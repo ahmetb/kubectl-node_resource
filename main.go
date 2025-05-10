@@ -19,8 +19,11 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/pager"
+	"k8s.io/klog/v2"
 )
 
 type nodeResult struct {
@@ -36,24 +39,66 @@ const (
 	sortByCPUPercent    = "cpu-percent"
 	sortByMemoryPercent = "memory-percent"
 	sortByNodeName      = "name"
+	nodeListLimit       = 500 // Page limit for node listing
 )
 
 func main() {
-	// override the default klog flags so that they don't appear in output
-	flag.Set("logtostderr", "true")
+	// Initialize klog flags
+	klog.InitFlags(nil)
+	goflags := flag.NewFlagSet("klog", flag.ContinueOnError)
+	klog.InitFlags(goflags) // klog.InitFlags needs a flag.FlagSet to register its flags.
 
 	root := &cobra.Command{
 		Use:   "kubectl-node-resources",
 		Short: "A kubectl plugin to show node resource allocations and utilization",
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			// Parse standard flags, then klog specific flags
+			// This ensures klog flags are parsed from cobra's flags
+			// and logtostderr is set if not provided.
+			if err := flag.CommandLine.Parse([]string{}); err != nil {
+				// This might happen if cobra flags are also present in flag.CommandLine
+				// klog.ErrorS(err, "Failed to parse command line flags for klog")
+				// We can often ignore this if klog flags are correctly passed via pflags
+			}
+			if f := flag.Lookup("logtostderr"); f != nil && f.Value.String() == "false" {
+				if err := flag.Set("logtostderr", "true"); err != nil {
+					klog.ErrorS(err, "Failed to set logtostderr")
+				}
+			}
+			return nil
+		},
 	}
 
+	root.PersistentFlags().AddGoFlagSet(goflags)
 	root.AddCommand(newAllocationsCmd())
 	root.AddCommand(newUtilizationCmd())
 
 	if err := root.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		klog.ErrorS(err, "Error executing command")
 		os.Exit(1)
 	}
+}
+
+func getAllNodesWithPagination(ctx context.Context, clientset *kubernetes.Clientset, labelSelector string) ([]corev1.Node, error) {
+	pg := pager.New(func(ctx context.Context, opts metav1.ListOptions) (runtime.Object, error) {
+		opts.LabelSelector = labelSelector
+		opts.Limit = nodeListLimit
+		return clientset.CoreV1().Nodes().List(ctx, opts)
+	})
+
+	var allNodes []corev1.Node
+	err := pg.EachListItem(ctx, metav1.ListOptions{}, func(obj runtime.Object) error {
+		node, ok := obj.(*corev1.Node)
+		if !ok {
+			return fmt.Errorf("unexpected object type: %T", obj)
+		}
+		allNodes = append(allNodes, *node)
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("error paginating node list: %w", err)
+	}
+	return allNodes, nil
 }
 
 // newAllocationsCmd returns the allocations subcommand.
@@ -72,38 +117,37 @@ func newAllocationsCmd() *cobra.Command {
 			if sortBy != sortByCPUPercent && sortBy != sortByMemoryPercent && sortBy != sortByNodeName {
 				return fmt.Errorf("invalid --sort-by value. Must be one of: cpu-percent, memory-percent, name")
 			}
+			klog.V(4).InfoS("Starting allocations command", "selector", args[0], "sortBy", sortBy, "showHostPorts", showHostPorts)
 
 			nodeSelector := args[0]
 
-			// Build Kubernetes client config
 			config, err := opts.ToRESTConfig()
 			if err != nil {
+				klog.ErrorS(err, "Failed to build Kubernetes client config")
 				return err
 			}
-			// Disable client QPS / burst
 			config.QPS = -1
 			config.Burst = -1
+			klog.V(5).InfoS("REST config created", "qps", config.QPS, "burst", config.Burst)
 
 			clientset, err := kubernetes.NewForConfig(config)
 			if err != nil {
+				klog.ErrorS(err, "Failed to create Kubernetes clientset")
 				return err
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute) // Increased timeout for potentially many nodes
 			defer cancel()
 
-			// List nodes using the provided selector
-			nodeList, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{
-				LabelSelector: nodeSelector,
-			})
+			allNodes, err := getAllNodesWithPagination(ctx, clientset, nodeSelector)
 			if err != nil {
+				klog.ErrorS(err, "Failed to get all nodes with pagination", "selector", nodeSelector)
 				return err
 			}
-			if len(nodeList.Items) == 0 {
-				fmt.Println("No nodes found with the given selector.")
+			if len(allNodes) == 0 {
+				klog.InfoS("No nodes found with the given selector.", "selector", nodeSelector)
 				return nil
 			}
 
-			// Prepare table writer
 			tw := tabwriter.NewWriter(os.Stdout, 0, 8, 2, ' ', 0)
 			header := "NODE\tCPU\tMEM\tCPU REQ\tMEM REQ\tCPU%\tMEM%"
 			if showHostPorts {
@@ -111,29 +155,30 @@ func newAllocationsCmd() *cobra.Command {
 			}
 			fmt.Fprintln(tw, header)
 
-			// Worker pool to concurrently list pods per node, limit max concurrent workers to 20
 			var wg sync.WaitGroup
-			results := make([]nodeResult, len(nodeList.Items))
+			results := make([]nodeResult, len(allNodes))
 			sem := make(chan struct{}, 20)
-			for i, node := range nodeList.Items {
+			klog.V(4).InfoS("Processing nodes in parallel", "maxWorkers", 20, "nodeCount", len(allNodes))
+			for i, node := range allNodes {
 				wg.Add(1)
 				sem <- struct{}{}
 				go func(i int, node corev1.Node) {
 					defer wg.Done()
 					defer func() { <-sem }()
+					klog.V(5).InfoS("Processing node", "nodeName", node.Name)
 
-					// List pods scheduled on this node across all namespaces.
 					podList, err := clientset.CoreV1().Pods("").List(ctx, metav1.ListOptions{
 						FieldSelector:   "spec.nodeName=" + node.Name,
 						ResourceVersion: "0",
+						Limit:           1000, // Limit pods per node call, though usually not an issue
 					})
 					if err != nil {
-						// On error, skip listing resources and assume zero requests.
+						klog.ErrorS(err, "Failed to list pods for node", "nodeName", node.Name)
 						results[i] = nodeResult{node: node}
 						return
 					}
+					klog.V(5).InfoS("Pods listed for node", "nodeName", node.Name, "podCount", len(podList.Items))
 
-					// Sum resource requests across pods.
 					var totalCPU, totalMem resource.Quantity
 					hostPortsMap := make(map[int32]struct{})
 
@@ -141,9 +186,7 @@ func newAllocationsCmd() *cobra.Command {
 						podCPU, podMem := aggregatePodRequests(&pod)
 						totalCPU.Add(podCPU)
 						totalMem.Add(podMem)
-
 						if showHostPorts {
-							// Collect host ports from all containers
 							for _, container := range pod.Spec.Containers {
 								for _, port := range container.Ports {
 									if port.HostPort > 0 {
@@ -151,7 +194,6 @@ func newAllocationsCmd() *cobra.Command {
 									}
 								}
 							}
-							// Check init containers too
 							for _, container := range pod.Spec.InitContainers {
 								for _, port := range container.Ports {
 									if port.HostPort > 0 {
@@ -166,46 +208,33 @@ func newAllocationsCmd() *cobra.Command {
 					allocMem := node.Status.Allocatable.Memory()
 					cpuPercent := calculatePercent(totalCPU.AsApproximateFloat64(), allocCPU.AsApproximateFloat64())
 					memPercent := calculatePercent(float64(totalMem.Value()), float64(allocMem.Value()))
-
-					// Convert host ports map to sorted slice
-					var hostPorts []int32
+					var currentHostPorts []int32
 					if showHostPorts {
 						for port := range hostPortsMap {
-							hostPorts = append(hostPorts, port)
+							currentHostPorts = append(currentHostPorts, port)
 						}
-						sort.Slice(hostPorts, func(i, j int) bool { return hostPorts[i] < hostPorts[j] })
+						sort.Slice(currentHostPorts, func(i, j int) bool { return currentHostPorts[i] < currentHostPorts[j] })
 					}
-
 					results[i] = nodeResult{
-						node:       node,
-						reqCPU:     totalCPU,
-						reqMem:     totalMem,
-						cpuPercent: cpuPercent,
-						memPercent: memPercent,
-						hostPorts:  hostPorts,
+						node: node, reqCPU: totalCPU, reqMem: totalMem,
+						cpuPercent: cpuPercent, memPercent: memPercent, hostPorts: currentHostPorts,
 					}
+					klog.V(5).InfoS("Finished processing node", "nodeName", node.Name, "reqCPU", totalCPU.String(), "reqMem", totalMem.String())
 				}(i, node)
 			}
 			wg.Wait()
+			klog.V(4).InfoS("All nodes processed")
 
-			// Sort results
 			sortResults(results, sortBy)
+			klog.V(4).InfoS("Results sorted", "sortBy", sortBy)
 
-			// Print table rows for allocations
 			for _, res := range results {
 				allocCPU := res.node.Status.Allocatable.Cpu()
 				allocMem := res.node.Status.Allocatable.Memory()
-
 				row := fmt.Sprintf("%s\t%s\t%s\t%s\t%s\t%.1f%%\t%.1f%%",
-					res.node.Name,
-					formatCPU(*allocCPU),
-					formatMemory(allocMem.Value()),
-					formatCPU(res.reqCPU),
-					formatMemory(res.reqMem.Value()),
-					res.cpuPercent,
-					res.memPercent,
-				)
-
+					res.node.Name, formatCPU(*allocCPU), formatMemory(allocMem.Value()),
+					formatCPU(res.reqCPU), formatMemory(res.reqMem.Value()),
+					res.cpuPercent, res.memPercent)
 				if showHostPorts {
 					portStrings := make([]string, len(res.hostPorts))
 					for i, port := range res.hostPorts {
@@ -217,19 +246,16 @@ func newAllocationsCmd() *cobra.Command {
 						row += "\t" + strings.Join(portStrings, ",")
 					}
 				}
-
 				fmt.Fprintln(tw, row)
 			}
 			tw.Flush()
+			klog.V(4).InfoS("Allocations command finished successfully")
 			return nil
 		},
 	}
 
-	cmd.Flags().StringVar(&sortBy, "sort-by", sortByCPUPercent,
-		fmt.Sprintf("Sort nodes by: %s, %s, or %s", sortByCPUPercent, sortByMemoryPercent, sortByNodeName))
+	cmd.Flags().StringVar(&sortBy, "sort-by", sortByCPUPercent, fmt.Sprintf("Sort nodes by: %s, %s, or %s", sortByCPUPercent, sortByMemoryPercent, sortByNodeName))
 	cmd.Flags().BoolVar(&showHostPorts, "show-host-ports", false, "Show host ports used by containers on each node")
-
-	// Add genericclioptions flags to the command
 	opts.AddFlags(cmd.Flags())
 	return cmd
 }
@@ -247,52 +273,57 @@ func newUtilizationCmd() *cobra.Command {
 			if sortBy != sortByCPUPercent && sortBy != sortByMemoryPercent && sortBy != sortByNodeName {
 				return fmt.Errorf("invalid --sort-by value. Must be one of: cpu-percent, memory-percent, name")
 			}
-
+			klog.V(4).InfoS("Starting utilization command", "selector", args[0], "sortBy", sortBy)
 			nodeSelector := args[0]
 
-			// Build Kubernetes client config
 			config, err := opts.ToRESTConfig()
 			if err != nil {
+				klog.ErrorS(err, "Failed to build Kubernetes client config")
 				return err
 			}
+			klog.V(5).InfoS("REST config created for utilization")
+
 			clientset, err := kubernetes.NewForConfig(config)
 			if err != nil {
+				klog.ErrorS(err, "Failed to create Kubernetes clientset")
 				return err
 			}
 			metricsClient, err := metricsclient.NewForConfig(config)
 			if err != nil {
+				klog.ErrorS(err, "Failed to create metrics client")
 				return err
 			}
 
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute) // Increased timeout
 			defer cancel()
 
-			// List nodes using the provided selector
-			nodeList, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{
-				LabelSelector: nodeSelector,
-			})
+			allNodes, err := getAllNodesWithPagination(ctx, clientset, nodeSelector)
 			if err != nil {
+				klog.ErrorS(err, "Failed to get all nodes with pagination for utilization", "selector", nodeSelector)
 				return err
 			}
-			if len(nodeList.Items) == 0 {
-				fmt.Println("No nodes found with the given selector.")
+			if len(allNodes) == 0 {
+				klog.InfoS("No nodes found with the given selector for utilization.", "selector", nodeSelector)
 				return nil
 			}
 
-			// Get node metrics
+			klog.V(4).InfoS("Fetching node metrics")
+			// Note: NodeMetricses().List does not support pagination in the same way core resources do.
+			// It typically returns all metrics in one go. If this becomes an issue for very large clusters,
+			// we might need to list nodes first and then get metrics for each node individually (less efficient).
 			metricsList, err := metricsClient.MetricsV1beta1().NodeMetricses().List(ctx, metav1.ListOptions{})
 			if err != nil {
+				klog.ErrorS(err, "Failed to list node metrics")
 				return err
 			}
-			// Create a map from node name to metrics.
 			metricsMap := make(map[string]metricsv.NodeMetrics)
 			for _, nm := range metricsList.Items {
 				metricsMap[nm.Name] = nm
 			}
+			klog.V(4).InfoS("Node metrics fetched", "count", len(metricsList.Items))
 
-			// Prepare results slice for sorting
-			results := make([]nodeResult, len(nodeList.Items))
-			for i, node := range nodeList.Items {
+			results := make([]nodeResult, len(allNodes))
+			for i, node := range allNodes {
 				allocCPU := node.Status.Allocatable.Cpu()
 				allocMem := node.Status.Allocatable.Memory()
 				var actCPU, actMem resource.Quantity
@@ -300,81 +331,66 @@ func newUtilizationCmd() *cobra.Command {
 					actCPU = nm.Usage[corev1.ResourceCPU]
 					actMem = nm.Usage[corev1.ResourceMemory]
 				} else {
+					klog.V(2).InfoS("Metrics not found for node, assuming zero usage", "nodeName", node.Name)
 					actCPU = *resource.NewQuantity(0, resource.DecimalSI)
 					actMem = *resource.NewQuantity(0, resource.BinarySI)
 				}
-
 				results[i] = nodeResult{
-					node:       node,
-					reqCPU:     actCPU,
-					reqMem:     actMem,
+					node: node, reqCPU: actCPU, reqMem: actMem,
 					cpuPercent: calculatePercent(actCPU.AsApproximateFloat64(), allocCPU.AsApproximateFloat64()),
 					memPercent: calculatePercent(float64(actMem.Value()), float64(allocMem.Value())),
 				}
 			}
 
-			// Sort results
 			sortResults(results, sortBy)
+			klog.V(4).InfoS("Utilization results sorted", "sortBy", sortBy)
 
-			// Prepare table writer and print results
 			tw := tabwriter.NewWriter(os.Stdout, 0, 8, 2, ' ', 0)
 			fmt.Fprintln(tw, "NODE\tCPU\tMEM\tCPU USED\tMEM USED\tCPU USE%\tMEM USE%")
-
 			for _, res := range results {
 				allocCPU := res.node.Status.Allocatable.Cpu()
 				allocMem := res.node.Status.Allocatable.Memory()
-
 				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%.1f%%\t%.1f%%\n",
-					res.node.Name,
-					formatCPU(*allocCPU),
-					formatMemory(allocMem.Value()),
-					formatCPU(res.reqCPU),
-					formatMemory(res.reqMem.Value()),
-					res.cpuPercent,
-					res.memPercent,
-				)
+					res.node.Name, formatCPU(*allocCPU), formatMemory(allocMem.Value()),
+					formatCPU(res.reqCPU), formatMemory(res.reqMem.Value()),
+					res.cpuPercent, res.memPercent)
 			}
 			tw.Flush()
+			klog.V(4).InfoS("Utilization command finished successfully")
 			return nil
 		},
 	}
 
-	cmd.Flags().StringVar(&sortBy, "sort-by", sortByCPUPercent,
-		fmt.Sprintf("Sort nodes by: %s, %s, or %s", sortByCPUPercent, sortByMemoryPercent, sortByNodeName))
-
+	cmd.Flags().StringVar(&sortBy, "sort-by", sortByCPUPercent, fmt.Sprintf("Sort nodes by: %s, %s, or %s", sortByCPUPercent, sortByMemoryPercent, sortByNodeName))
 	opts.AddFlags(cmd.Flags())
 	return cmd
 }
 
-// sortResults sorts the results slice based on the specified sort key
 func sortResults(results []nodeResult, sortBy string) {
 	sort.Slice(results, func(i, j int) bool {
 		switch sortBy {
 		case sortByCPUPercent:
 			if results[i].cpuPercent != results[j].cpuPercent {
-				return results[i].cpuPercent > results[j].cpuPercent // descending
+				return results[i].cpuPercent > results[j].cpuPercent
 			}
 			if results[i].memPercent != results[j].memPercent {
-				return results[i].memPercent > results[j].memPercent // descending
+				return results[i].memPercent > results[j].memPercent
 			}
-			return results[i].node.Name < results[j].node.Name // ascending
-
+			return results[i].node.Name < results[j].node.Name
 		case sortByMemoryPercent:
 			if results[i].memPercent != results[j].memPercent {
-				return results[i].memPercent > results[j].memPercent // descending
+				return results[i].memPercent > results[j].memPercent
 			}
 			if results[i].cpuPercent != results[j].cpuPercent {
-				return results[i].cpuPercent > results[j].cpuPercent // descending
+				return results[i].cpuPercent > results[j].cpuPercent
 			}
-			return results[i].node.Name < results[j].node.Name // ascending
-
+			return results[i].node.Name < results[j].node.Name
 		default: // sortByNodeName
-			return results[i].node.Name < results[j].node.Name // ascending
+			return results[i].node.Name < results[j].node.Name
 		}
 	})
 }
 
-// calculatePercent returns the percentage value
 func calculatePercent(used, total float64) float64 {
 	if total == 0 {
 		return 0
@@ -382,15 +398,11 @@ func calculatePercent(used, total float64) float64 {
 	return (used / total) * 100
 }
 
-// aggregatePodRequests sums resource requests for a pod, considering both containers and initContainers.
-// For initContainers, the effective request is the maximum request among them.
 func aggregatePodRequests(pod *corev1.Pod) (resource.Quantity, resource.Quantity) {
 	sumCPU := *resource.NewQuantity(0, resource.DecimalSI)
 	sumMem := *resource.NewQuantity(0, resource.BinarySI)
 	maxInitCPU := *resource.NewQuantity(0, resource.DecimalSI)
 	maxInitMem := *resource.NewQuantity(0, resource.BinarySI)
-
-	// Sum requests for regular containers.
 	for _, container := range pod.Spec.Containers {
 		if req, ok := container.Resources.Requests[corev1.ResourceCPU]; ok {
 			sumCPU.Add(req)
@@ -399,8 +411,6 @@ func aggregatePodRequests(pod *corev1.Pod) (resource.Quantity, resource.Quantity
 			sumMem.Add(req)
 		}
 	}
-
-	// For initContainers, take the maximum request instead of sum.
 	for _, container := range pod.Spec.InitContainers {
 		if req, ok := container.Resources.Requests[corev1.ResourceCPU]; ok {
 			if req.Cmp(maxInitCPU) > 0 {
@@ -413,8 +423,6 @@ func aggregatePodRequests(pod *corev1.Pod) (resource.Quantity, resource.Quantity
 			}
 		}
 	}
-
-	// Effective pod CPU/memory is the max of (sum of containers) and (max init container)
 	if sumCPU.Cmp(maxInitCPU) < 0 {
 		sumCPU = maxInitCPU.DeepCopy()
 	}
@@ -424,7 +432,6 @@ func aggregatePodRequests(pod *corev1.Pod) (resource.Quantity, resource.Quantity
 	return sumCPU, sumMem
 }
 
-// formatCPU formats CPU quantities in decimal cores, with a minimum of 0.1 cores
 func formatCPU(q resource.Quantity) string {
 	cores := q.AsApproximateFloat64()
 	if cores > 0 && cores < 0.1 {
@@ -433,13 +440,11 @@ func formatCPU(q resource.Quantity) string {
 	return fmt.Sprintf("%.1f", cores)
 }
 
-// formatMemory formats memory quantities in appropriate units (MiB/GiB)
 func formatMemory(bytes int64) string {
 	const (
 		mib = 1024 * 1024
 		gib = mib * 1024
 	)
-
 	switch {
 	case bytes >= gib:
 		return fmt.Sprintf("%.1fG", float64(bytes)/float64(gib))
