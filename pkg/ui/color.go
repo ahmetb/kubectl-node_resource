@@ -1,11 +1,13 @@
-package main
+// Package ui provides utilities for user interface elements, such as terminal colors and progress bars.
+package ui
 
 import (
 	"fmt"
 	"math"
 )
 
-const colorReset = "\033[0m"
+// ColorReset is the ANSI escape code to reset terminal color.
+const ColorReset = "\033[0m"
 
 // cubeLevels are the standard values for each component in the 6x6x6 color cube.
 var cubeLevels = []int{0, 95, 135, 175, 215, 255}
@@ -45,6 +47,9 @@ func rgbTo256ColorIndex(r, g, b int) int {
 
 // GetColorForPercentage returns an ANSI escape code string for a foreground color
 // representing the given percentage on a green-yellow-red gradient.
+// Percentages are clamped to the 0-100 range.
+// 0-50% transitions from green to yellow.
+// 50-100% transitions from yellow to red.
 func GetColorForPercentage(percentage float64) string {
 	// Clamp percentage to the 0-100 range
 	p := math.Max(0, math.Min(100, percentage))
