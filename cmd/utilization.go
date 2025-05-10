@@ -152,13 +152,14 @@ func runUtilization(ctx context.Context, configFlags *genericclioptions.ConfigFl
 	utils.SortResults(results, sortBy)
 	klog.V(4).InfoS("Utilization results sorted", "sortBy", sortBy)
 
-	table := tablewriter.NewTable(streams.Out) // Changed to NewTable
+	table := tablewriter.NewWriter(streams.Out) // Changed to NewTable
 	headerVals := []string{"NODE", "CPU", "CPU USED", "CPU%", "MEMORY", "MEM USED", "MEM%"}
 	if showFree {
 		headerVals = append(headerVals, "FREE CPU", "FREE MEMORY")
 	}
-	table.Header(headerVals) // Changed to Header (expects []string)
-	// table.SetBorder(false)    // Removed as it seems unavailable
+
+	table.SetHeader(headerVals) // Pass slice directly
+	setKubectlTableStyle(table)
 
 	for _, res := range results {
 		allocCPU := res.Node.Status.Allocatable.Cpu()

@@ -85,6 +85,12 @@ func PercentBackgroundColor(percentage float64) string {
 
 	var r, g, b int
 
+	// use black color for foreground for light backgrounds
+	var foregroundColor string
+	if percentage < 65 {
+		foregroundColor = "\033[30m" // black font
+	}
+
 	if p <= 50 {
 		// Gradient from Green (0,255,0) to Yellow (255,255,0)
 		factor := p / 50.0
@@ -100,5 +106,5 @@ func PercentBackgroundColor(percentage float64) string {
 	}
 
 	colorIndex := rgbTo256ColorIndex(r, g, b)
-	return fmt.Sprintf("\033[48;5;%dm", colorIndex)
+	return fmt.Sprintf(foregroundColor+"\033[48;5;%dm", colorIndex)
 }

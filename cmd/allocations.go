@@ -217,7 +217,7 @@ func runAllocations(ctx context.Context, configFlags *genericclioptions.ConfigFl
 	utils.SortResults(results, sortBy)
 	klog.V(4).InfoS("Results sorted", "sortBy", sortBy)
 
-	table := tablewriter.NewTable(streams.Out) // Changed to NewTable
+	table := tablewriter.NewWriter(streams.Out) // Changed to NewTable
 	headerSlice := []string{"NODE", "CPU", "CPU REQ", "CPU%", "MEMORY", "MEM REQ", "MEM%"}
 	if showFree {
 		headerSlice = append(headerSlice, "FREE CPU", "FREE MEMORY")
@@ -225,8 +225,8 @@ func runAllocations(ctx context.Context, configFlags *genericclioptions.ConfigFl
 	if showHostPorts {
 		headerSlice = append(headerSlice, "HOST PORTS")
 	}
-	table.Header(headerSlice) // Pass slice directly
-	// table.SetBorder(false)    // Removed as it seems unavailable
+	table.SetHeader(headerSlice) // Pass slice directly
+	setKubectlTableStyle(table)
 
 	for _, res := range results {
 		allocCPU := res.Node.Status.Allocatable.Cpu()
@@ -329,4 +329,18 @@ func aggregatePodRequests(pod *corev1.Pod) (resource.Quantity, resource.Quantity
 	}
 
 	return sumCPU, sumMem
+}
+
+func setKubectlTableStyle(table *tablewriter.Table) {
+	table.SetAutoWrapText(false)
+	table.SetAutoFormatHeaders(true)
+	table.SetHeaderAlignment(tablewriter.ALIGN_LEFT)
+	table.SetAlignment(tablewriter.ALIGN_LEFT)
+	table.SetCenterSeparator("")
+	table.SetColumnSeparator("")
+	table.SetRowSeparator("")
+	table.SetHeaderLine(false)
+	table.SetBorder(false)
+	table.SetTablePadding("  ") // pad with tabs
+	table.SetNoWhiteSpace(true)
 }
