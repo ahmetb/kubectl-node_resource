@@ -8,11 +8,16 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
+
+	// "sync" // Replaced by errgroup for this section
 	"text/tabwriter"
 	"time"
 
+	"golang.org/x/sync/errgroup"
+	// "sync/atomic" // No longer directly needed here, moved to progressbar_utils
 	"github.com/spf13/cobra"
+	// "github.com/mattn/go-isatty" // Moved to progressbar_utils
+	// "github.com/schollz/progressbar/v3" // Moved to progressbar_utils
 	corev1 "k8s.io/api/core/v1"
 	metricsv "k8s.io/metrics/pkg/apis/metrics/v1beta1"
 	metricsclient "k8s.io/metrics/pkg/client/clientset/versioned"
@@ -155,27 +160,28 @@ func newAllocationsCmd() *cobra.Command {
 			}
 			fmt.Fprintln(tw, header)
 
-			var wg sync.WaitGroup
 			results := make([]nodeResult, len(allNodes))
-			sem := make(chan struct{}, 20)
-			klog.V(4).InfoS("Processing nodes in parallel", "maxWorkers", 20, "nodeCount", len(allNodes))
+			progressHelper := newProgressBarHelper(len(allNodes)) // Initialize progress bar helper
+
+			// Use errgroup for concurrent processing
+			g, gCtx := errgroup.WithContext(ctx)
+			g.SetLimit(20) // Concurrency limiter for k8s API calls
+
+			klog.V(4).InfoS("Processing nodes in parallel with errgroup", "maxWorkers", 20, "nodeCount", len(allNodes))
 			for i, node := range allNodes {
-				wg.Add(1)
-				sem <- struct{}{}
-				go func(i int, node corev1.Node) {
-					defer wg.Done()
-					defer func() { <-sem }()
+				i, node := i, node // Capture range variables
+				g.Go(func() error {
 					klog.V(5).InfoS("Processing node", "nodeName", node.Name)
 
-					podList, err := clientset.CoreV1().Pods("").List(ctx, metav1.ListOptions{
+					// Use gCtx for API calls so they can be cancelled by the errgroup
+					podList, err := clientset.CoreV1().Pods("").List(gCtx, metav1.ListOptions{
 						FieldSelector:   "spec.nodeName=" + node.Name,
 						ResourceVersion: "0",
-						Limit:           1000, // Limit pods per node call, though usually not an issue
+						Limit:           1000, // Limit pods per node call
 					})
 					if err != nil {
-						klog.ErrorS(err, "Failed to list pods for node", "nodeName", node.Name)
-						results[i] = nodeResult{node: node}
-						return
+						// No klog.ErrorS here, just return the error to the group
+						return fmt.Errorf("failed to list pods for node %s: %w", node.Name, err)
 					}
 					klog.V(5).InfoS("Pods listed for node", "nodeName", node.Name, "podCount", len(podList.Items))
 
@@ -183,6 +189,10 @@ func newAllocationsCmd() *cobra.Command {
 					hostPortsMap := make(map[int32]struct{})
 
 					for _, pod := range podList.Items {
+						// Check for context cancellation before processing each pod
+						if gCtx.Err() != nil {
+							return gCtx.Err()
+						}
 						podCPU, podMem := aggregatePodRequests(&pod)
 						totalCPU.Add(podCPU)
 						totalMem.Add(podMem)
@@ -215,15 +225,32 @@ func newAllocationsCmd() *cobra.Command {
 						}
 						sort.Slice(currentHostPorts, func(i, j int) bool { return currentHostPorts[i] < currentHostPorts[j] })
 					}
-					results[i] = nodeResult{
+					results[i] = nodeResult{ // This write needs to be thread-safe if results is shared directly, but here each goroutine writes to its own index.
 						node: node, reqCPU: totalCPU, reqMem: totalMem,
 						cpuPercent: cpuPercent, memPercent: memPercent, hostPorts: currentHostPorts,
 					}
 					klog.V(5).InfoS("Finished processing node", "nodeName", node.Name, "reqCPU", totalCPU.String(), "reqMem", totalMem.String())
-				}(i, node)
+
+					if progressHelper != nil {
+						progressHelper.Increment()
+					}
+					return nil
+				})
 			}
-			wg.Wait()
-			klog.V(4).InfoS("All nodes processed")
+
+			// Wait for all goroutines to complete and check for errors
+			if err := g.Wait(); err != nil {
+				if progressHelper != nil {
+					progressHelper.Finish() // Ensure progress bar is cleaned up on error
+				}
+				klog.ErrorS(err, "Error processing nodes")
+				return err // Propagate the error
+			}
+
+			if progressHelper != nil {
+				progressHelper.Finish()
+			}
+			klog.V(4).InfoS("All nodes processed successfully")
 
 			sortResults(results, sortBy)
 			klog.V(4).InfoS("Results sorted", "sortBy", sortBy)
@@ -476,10 +503,9 @@ func printResourcePercentiles(results []nodeResult, resourceName string) {
 		value float64
 	}{
 		{"P10", 0.10},
-		{"Median(P50)", 0.50},
+		{"P50 (median)", 0.50},
 		{"P90", 0.90},
-		{"P99", 0.99},
-		{"Max (P100)", 1.00}, // Max is effectively P100
+		{"P100 (max)", 1.00}, // Max is effectively P100
 	}
 
 	n := len(sortedResults)
