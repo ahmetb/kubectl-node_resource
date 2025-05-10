@@ -4,8 +4,10 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"text/tabwriter"
 
+	// "strings" // No longer needed after refactoring row population
+
+	"github.com/olekukonko/tablewriter"
 	// "os" // Not needed here based on allocations.go refactor
 
 	"github.com/spf13/cobra"
@@ -150,8 +152,14 @@ func runUtilization(ctx context.Context, configFlags *genericclioptions.ConfigFl
 	utils.SortResults(results, sortBy)
 	klog.V(4).InfoS("Utilization results sorted", "sortBy", sortBy)
 
-	// First collect all formatted rows
-	rows := make([]string, 0, len(results))
+	table := tablewriter.NewTable(streams.Out) // Changed to NewTable
+	headerVals := []string{"NODE", "CPU", "CPU USED", "CPU%", "MEMORY", "MEM USED", "MEM%"}
+	if showFree {
+		headerVals = append(headerVals, "FREE CPU", "FREE MEMORY")
+	}
+	table.Header(headerVals) // Changed to Header (expects []string)
+	// table.SetBorder(false)    // Removed as it seems unavailable
+
 	for _, res := range results {
 		allocCPU := res.Node.Status.Allocatable.Cpu()
 		allocMem := res.Node.Status.Allocatable.Memory()
@@ -159,39 +167,27 @@ func runUtilization(ctx context.Context, configFlags *genericclioptions.ConfigFl
 		cpuColor := ui.PercentFontColor(res.CPUPercent)
 		memColor := ui.PercentFontColor(res.MemPercent)
 
-		row := fmt.Sprintf("%s\t%s\t%s\t%s%.1f%%%s\t%s\t%s\t%s%.1f%%%s",
-			res.Node.Name, utils.FormatCPU(*allocCPU),
+		rowValues := []string{
+			res.Node.Name,
+			utils.FormatCPU(*allocCPU),
 			utils.FormatCPU(res.ReqCPU),
-			cpuColor, res.CPUPercent, ui.ColorReset,
+			fmt.Sprintf("%s%.1f%%%s", cpuColor, res.CPUPercent, ui.ColorReset),
 			utils.FormatMemory(allocMem.Value()),
 			utils.FormatMemory(res.ReqMem.Value()),
-			memColor, res.MemPercent, ui.ColorReset)
+			fmt.Sprintf("%s%.1f%%%s", memColor, res.MemPercent, ui.ColorReset),
+		}
 
 		if showFree {
-			freeCPUColor := ui.PercentBackgroundColor(100 - res.CPUPercent)
-			freeMemColor := ui.PercentBackgroundColor(100 - res.MemPercent)
-			row += fmt.Sprintf("\t%s%s%s\t%s%s%s",
-				freeCPUColor, utils.FormatCPU(res.FreeCPU), ui.ColorReset,
-				freeMemColor, utils.FormatMemory(res.FreeMem.Value()), ui.ColorReset)
+			freeCPUColor := ui.PercentBackgroundColor(res.CPUPercent)
+			freeMemColor := ui.PercentBackgroundColor(res.MemPercent)
+			rowValues = append(rowValues,
+				fmt.Sprintf("%s%s%s", freeCPUColor, utils.FormatCPU(res.FreeCPU), ui.ColorReset),
+				fmt.Sprintf("%s%s%s", freeMemColor, utils.FormatMemory(res.FreeMem.Value()), ui.ColorReset),
+			)
 		}
-		rows = append(rows, row)
+		table.Append(rowValues)
 	}
-
-	// Now create and configure the tabwriter
-	tw := tabwriter.NewWriter(streams.Out, 0, 0, 2, ' ', 0)
-
-	// Define the header after we know what columns we'll display
-	header := "NODE    CPU    CPU USED    CPU%    MEMORY    MEM USED    MEM%"
-	if showFree {
-		header += "    FREE CPU    FREE MEMORY"
-	}
-	fmt.Fprintln(tw, header)
-
-	// Print all collected rows
-	for _, row := range rows {
-		fmt.Fprintln(tw, row)
-	}
-	tw.Flush()
+	table.Render()
 
 	// Call PrintUtilizationSummary from pkg/summary
 	// TODO: Update PrintUtilizationSummary if it needs to be aware of showFree

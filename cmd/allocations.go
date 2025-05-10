@@ -7,8 +7,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"text/tabwriter"
 
+	"github.com/olekukonko/tablewriter"
 	// TODO: Update this import path once progressbar_utils.go is moved
 	// For now, assuming it's in the main package or a directly accessible path.
 	// If progressbarHelper is in main, we might need to pass it or rethink its direct usage here.
@@ -217,8 +217,17 @@ func runAllocations(ctx context.Context, configFlags *genericclioptions.ConfigFl
 	utils.SortResults(results, sortBy)
 	klog.V(4).InfoS("Results sorted", "sortBy", sortBy)
 
-	// First collect all formatted rows
-	rows := make([]string, 0, len(results))
+	table := tablewriter.NewTable(streams.Out) // Changed to NewTable
+	headerSlice := []string{"NODE", "CPU", "CPU REQ", "CPU%", "MEMORY", "MEM REQ", "MEM%"}
+	if showFree {
+		headerSlice = append(headerSlice, "FREE CPU", "FREE MEMORY")
+	}
+	if showHostPorts {
+		headerSlice = append(headerSlice, "HOST PORTS")
+	}
+	table.Header(headerSlice) // Pass slice directly
+	// table.SetBorder(false)    // Removed as it seems unavailable
+
 	for _, res := range results {
 		allocCPU := res.Node.Status.Allocatable.Cpu()
 		allocMem := res.Node.Status.Allocatable.Memory()
@@ -226,20 +235,23 @@ func runAllocations(ctx context.Context, configFlags *genericclioptions.ConfigFl
 		cpuColor := ui.PercentFontColor(res.CPUPercent)
 		memColor := ui.PercentFontColor(res.MemPercent)
 
-		row := fmt.Sprintf("%s\t%s\t%s\t%s%.1f%%%s\t%s\t%s\t%s%.1f%%%s",
-			res.Node.Name, utils.FormatCPU(*allocCPU),
+		rowValues := []string{
+			res.Node.Name,
+			utils.FormatCPU(*allocCPU),
 			utils.FormatCPU(res.ReqCPU),
-			cpuColor, res.CPUPercent, ui.ColorReset,
+			fmt.Sprintf("%s%.1f%%%s", cpuColor, res.CPUPercent, ui.ColorReset),
 			utils.FormatMemory(allocMem.Value()),
 			utils.FormatMemory(res.ReqMem.Value()),
-			memColor, res.MemPercent, ui.ColorReset)
+			fmt.Sprintf("%s%.1f%%%s", memColor, res.MemPercent, ui.ColorReset),
+		}
 
 		if showFree {
-			freeCPUColor := ui.PercentBackgroundColor(100 - res.CPUPercent)
-			freeMemColor := ui.PercentBackgroundColor(100 - res.MemPercent)
-			row += fmt.Sprintf("\t%s%s%s\t%s%s%s",
-				freeCPUColor, utils.FormatCPU(res.FreeCPU), ui.ColorReset,
-				freeMemColor, utils.FormatMemory(res.FreeMem.Value()), ui.ColorReset)
+			freeCPUColor := ui.PercentBackgroundColor(res.CPUPercent)
+			freeMemColor := ui.PercentBackgroundColor(res.MemPercent)
+			rowValues = append(rowValues,
+				fmt.Sprintf("%s%s%s", freeCPUColor, utils.FormatCPU(res.FreeCPU), ui.ColorReset),
+				fmt.Sprintf("%s%s%s", freeMemColor, utils.FormatMemory(res.FreeMem.Value()), ui.ColorReset),
+			)
 		}
 
 		if showHostPorts {
@@ -248,32 +260,14 @@ func runAllocations(ctx context.Context, configFlags *genericclioptions.ConfigFl
 				portStrings[i] = strconv.Itoa(int(port))
 			}
 			if len(portStrings) == 0 {
-				row += "\t-"
+				rowValues = append(rowValues, "-")
 			} else {
-				row += "\t" + strings.Join(portStrings, ",")
+				rowValues = append(rowValues, strings.Join(portStrings, ","))
 			}
 		}
-		rows = append(rows, row)
+		table.Append(rowValues)
 	}
-
-	// Now configure tabwriter
-	tw := tabwriter.NewWriter(streams.Out, 0, 0, 2, ' ', 0)
-
-	// Define header
-	header := "NODE    CPU    CPU REQ    CPU%    MEMORY    MEM REQ    MEM%"
-	if showFree {
-		header += "    FREE CPU    FREE MEMORY"
-	}
-	if showHostPorts {
-		header += "    HOST PORTS"
-	}
-	fmt.Fprintln(tw, header)
-
-	// Print all collected rows
-	for _, row := range rows {
-		fmt.Fprintln(tw, row)
-	}
-	tw.Flush()
+	table.Render()
 
 	// Call PrintAllocationSummary from pkg/summary
 	// Ensure streams.Out is passed, which implements io.Writer
