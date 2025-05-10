@@ -109,8 +109,8 @@ func printResourcePercentiles(results []nodeResult, summaryContext string, resou
 			valueString = formatMemory(nodeRes.reqMem.Value()) // reqMem stores actual usage in utilization context
 			percentValue = nodeRes.memPercent
 		}
-		fmt.Printf("  - %-12s: %s (%s: %s, %.1f%%)\n",
-			p.name, nodeRes.node.Name, strings.Title(contextVerb), valueString, percentValue)
+		fmt.Printf("  - %-12s: %s (%s: %s, %s%.1f%%%s)\n",
+			p.name, nodeRes.node.Name, strings.Title(contextVerb), valueString, GetColorForPercentage(percentValue), percentValue, colorReset)
 	}
 }
 

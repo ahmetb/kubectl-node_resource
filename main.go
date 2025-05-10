@@ -258,10 +258,11 @@ func newAllocationsCmd() *cobra.Command {
 			for _, res := range results {
 				allocCPU := res.node.Status.Allocatable.Cpu()
 				allocMem := res.node.Status.Allocatable.Memory()
-				row := fmt.Sprintf("%s\t%s\t%s\t%s\t%s\t%.1f%%\t%.1f%%",
+				row := fmt.Sprintf("%s\t%s\t%s\t%s\t%s\t%s%.1f%%%s\t%s%.1f%%%s",
 					res.node.Name, formatCPU(*allocCPU), formatMemory(allocMem.Value()),
 					formatCPU(res.reqCPU), formatMemory(res.reqMem.Value()),
-					res.cpuPercent, res.memPercent)
+					GetColorForPercentage(res.cpuPercent), res.cpuPercent, colorReset,
+					GetColorForPercentage(res.memPercent), res.memPercent, colorReset)
 				if showHostPorts {
 					portStrings := make([]string, len(res.hostPorts))
 					for i, port := range res.hostPorts {
@@ -381,10 +382,11 @@ func newUtilizationCmd() *cobra.Command {
 			for _, res := range results {
 				allocCPU := res.node.Status.Allocatable.Cpu()
 				allocMem := res.node.Status.Allocatable.Memory()
-				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%.1f%%\t%.1f%%\n",
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s%.1f%%%s\t%s%.1f%%%s\n",
 					res.node.Name, formatCPU(*allocCPU), formatMemory(allocMem.Value()),
 					formatCPU(res.reqCPU), formatMemory(res.reqMem.Value()),
-					res.cpuPercent, res.memPercent)
+					GetColorForPercentage(res.cpuPercent), res.cpuPercent, colorReset,
+					GetColorForPercentage(res.memPercent), res.memPercent, colorReset)
 			}
 			tw.Flush()
 
