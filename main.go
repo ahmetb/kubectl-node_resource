@@ -4,8 +4,8 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"math"
 	"os"
+	"sort"
 	"sync"
 	"text/tabwriter"
 	"time"
@@ -21,12 +21,26 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
+type nodeResult struct {
+	node       corev1.Node
+	reqCPU     resource.Quantity
+	reqMem     resource.Quantity
+	cpuPercent float64
+	memPercent float64
+}
+
+const (
+	sortByCPUPercent    = "cpu-percent"
+	sortByMemoryPercent = "memory-percent"
+	sortByNodeName      = "name"
+)
+
 func main() {
 	// override the default klog flags so that they don't appear in output
 	flag.Set("logtostderr", "true")
 
 	root := &cobra.Command{
-		Use:   "kubectl-node-resources",
+		Use:   "kubectl node-resources",
 		Short: "A kubectl plugin to show node resource allocations and utilization",
 	}
 
@@ -42,11 +56,17 @@ func main() {
 // newAllocationsCmd returns the allocations subcommand.
 func newAllocationsCmd() *cobra.Command {
 	opts := genericclioptions.NewConfigFlags(true)
+	var sortBy string
+
 	cmd := &cobra.Command{
 		Use:   "allocations [node-selector]",
 		Short: "Show resource allocations for nodes (sum of pod resource requests)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if sortBy != sortByCPUPercent && sortBy != sortByMemoryPercent && sortBy != sortByNodeName {
+				return fmt.Errorf("invalid --sort-by value. Must be one of: cpu-percent, memory-percent, node-name")
+			}
+
 			nodeSelector := args[0]
 
 			// Build Kubernetes client config
@@ -83,10 +103,6 @@ func newAllocationsCmd() *cobra.Command {
 
 			// Worker pool to concurrently list pods per node, limit max concurrent workers to 20
 			var wg sync.WaitGroup
-			type nodeResult struct {
-				node           corev1.Node
-				reqCPU, reqMem resource.Quantity
-			}
 			results := make([]nodeResult, len(nodeList.Items))
 			sem := make(chan struct{}, 20)
 			for i, node := range nodeList.Items {
@@ -114,34 +130,49 @@ func newAllocationsCmd() *cobra.Command {
 						totalCPU.Add(podCPU)
 						totalMem.Add(podMem)
 					}
+
+					allocCPU := node.Status.Allocatable.Cpu()
+					allocMem := node.Status.Allocatable.Memory()
+					cpuPercent := calculatePercent(totalCPU.AsApproximateFloat64(), allocCPU.AsApproximateFloat64())
+					memPercent := calculatePercent(float64(totalMem.Value()), float64(allocMem.Value()))
+
 					results[i] = nodeResult{
-						node:   node,
-						reqCPU: totalCPU,
-						reqMem: totalMem,
+						node:       node,
+						reqCPU:     totalCPU,
+						reqMem:     totalMem,
+						cpuPercent: cpuPercent,
+						memPercent: memPercent,
 					}
 				}(i, node)
 			}
 			wg.Wait()
+
+			// Sort results
+			sortResults(results, sortBy)
 
 			// Print table rows for allocations
 			for _, res := range results {
 				allocCPU := res.node.Status.Allocatable.Cpu()
 				allocMem := res.node.Status.Allocatable.Memory()
 
-				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%.1f%%\t%.1f%%\n",
 					res.node.Name,
 					formatCPU(*allocCPU),
 					formatMemory(allocMem.Value()),
 					formatCPU(res.reqCPU),
 					formatMemory(res.reqMem.Value()),
-					formatPercent(res.reqCPU.AsApproximateFloat64(), allocCPU.AsApproximateFloat64()),
-					formatPercent(float64(res.reqMem.Value()), float64(allocMem.Value())),
+					res.cpuPercent,
+					res.memPercent,
 				)
 			}
 			tw.Flush()
 			return nil
 		},
 	}
+
+	cmd.Flags().StringVar(&sortBy, "sort-by", sortByCPUPercent,
+		fmt.Sprintf("Sort nodes by: %s, %s, or %s", sortByCPUPercent, sortByMemoryPercent, sortByNodeName))
+
 	// Add genericclioptions flags to the command
 	opts.AddFlags(cmd.Flags())
 	return cmd
@@ -150,11 +181,17 @@ func newAllocationsCmd() *cobra.Command {
 // newUtilizationCmd returns the utilization subcommand.
 func newUtilizationCmd() *cobra.Command {
 	opts := genericclioptions.NewConfigFlags(true)
+	var sortBy string
+
 	cmd := &cobra.Command{
 		Use:   "utilization [node-selector]",
 		Short: "Show actual node utilization (similar to kubectl top node)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if sortBy != sortByCPUPercent && sortBy != sortByMemoryPercent && sortBy != sortByNodeName {
+				return fmt.Errorf("invalid --sort-by value. Must be one of: cpu-percent, memory-percent, name")
+			}
+
 			nodeSelector := args[0]
 
 			// Build Kubernetes client config
@@ -197,14 +234,11 @@ func newUtilizationCmd() *cobra.Command {
 				metricsMap[nm.Name] = nm
 			}
 
-			// Prepare table writer
-			tw := tabwriter.NewWriter(os.Stdout, 0, 8, 2, ' ', 0)
-			fmt.Fprintln(tw, "NODE\tCPU\tMEM\tCPU USED\tMEM USED\tCPU USE%\tMEM USE%")
-			// Iterate over nodes and print metrics
-			for _, node := range nodeList.Items {
+			// Prepare results slice for sorting
+			results := make([]nodeResult, len(nodeList.Items))
+			for i, node := range nodeList.Items {
 				allocCPU := node.Status.Allocatable.Cpu()
 				allocMem := node.Status.Allocatable.Memory()
-				// Get actual metrics if available
 				var actCPU, actMem resource.Quantity
 				if nm, ok := metricsMap[node.Name]; ok {
 					actCPU = nm.Usage[corev1.ResourceCPU]
@@ -214,22 +248,82 @@ func newUtilizationCmd() *cobra.Command {
 					actMem = *resource.NewQuantity(0, resource.BinarySI)
 				}
 
-				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-					node.Name,
+				results[i] = nodeResult{
+					node:       node,
+					reqCPU:     actCPU,
+					reqMem:     actMem,
+					cpuPercent: calculatePercent(actCPU.AsApproximateFloat64(), allocCPU.AsApproximateFloat64()),
+					memPercent: calculatePercent(float64(actMem.Value()), float64(allocMem.Value())),
+				}
+			}
+
+			// Sort results
+			sortResults(results, sortBy)
+
+			// Prepare table writer and print results
+			tw := tabwriter.NewWriter(os.Stdout, 0, 8, 2, ' ', 0)
+			fmt.Fprintln(tw, "NODE\tCPU\tMEM\tCPU USED\tMEM USED\tCPU USE%\tMEM USE%")
+
+			for _, res := range results {
+				allocCPU := res.node.Status.Allocatable.Cpu()
+				allocMem := res.node.Status.Allocatable.Memory()
+
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%.1f%%\t%.1f%%\n",
+					res.node.Name,
 					formatCPU(*allocCPU),
 					formatMemory(allocMem.Value()),
-					formatCPU(actCPU),
-					formatMemory(actMem.Value()),
-					formatPercent(actCPU.AsApproximateFloat64(), allocCPU.AsApproximateFloat64()),
-					formatPercent(float64(actMem.Value()), float64(allocMem.Value())),
+					formatCPU(res.reqCPU),
+					formatMemory(res.reqMem.Value()),
+					res.cpuPercent,
+					res.memPercent,
 				)
 			}
 			tw.Flush()
 			return nil
 		},
 	}
+
+	cmd.Flags().StringVar(&sortBy, "sort-by", sortByCPUPercent,
+		fmt.Sprintf("Sort nodes by: %s, %s, or %s", sortByCPUPercent, sortByMemoryPercent, sortByNodeName))
+
 	opts.AddFlags(cmd.Flags())
 	return cmd
+}
+
+// sortResults sorts the results slice based on the specified sort key
+func sortResults(results []nodeResult, sortBy string) {
+	sort.Slice(results, func(i, j int) bool {
+		switch sortBy {
+		case sortByCPUPercent:
+			if results[i].cpuPercent != results[j].cpuPercent {
+				return results[i].cpuPercent > results[j].cpuPercent // descending
+			}
+			if results[i].memPercent != results[j].memPercent {
+				return results[i].memPercent > results[j].memPercent // descending
+			}
+			return results[i].node.Name < results[j].node.Name // ascending
+
+		case sortByMemoryPercent:
+			if results[i].memPercent != results[j].memPercent {
+				return results[i].memPercent > results[j].memPercent // descending
+			}
+			if results[i].cpuPercent != results[j].cpuPercent {
+				return results[i].cpuPercent > results[j].cpuPercent // descending
+			}
+			return results[i].node.Name < results[j].node.Name // ascending
+
+		default: // sortByNodeName
+			return results[i].node.Name < results[j].node.Name // ascending
+		}
+	})
+}
+
+// calculatePercent returns the percentage value
+func calculatePercent(used, total float64) float64 {
+	if total == 0 {
+		return 0
+	}
+	return (used / total) * 100
 }
 
 // aggregatePodRequests sums resource requests for a pod, considering both containers and initContainers.
@@ -296,12 +390,4 @@ func formatMemory(bytes int64) string {
 	default:
 		return fmt.Sprintf("%dM", bytes/mib)
 	}
-}
-
-// formatPercent formats the percentage with no decimal places
-func formatPercent(used, total float64) string {
-	if total == 0 {
-		return "N/A"
-	}
-	return fmt.Sprintf("%.0f%%", math.Round((used/total)*100))
 }
