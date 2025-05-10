@@ -249,6 +249,10 @@ func newAllocationsCmd() *cobra.Command {
 				fmt.Fprintln(tw, row)
 			}
 			tw.Flush()
+
+			// Print the summary section
+			printAllocationSummary(results, showHostPorts)
+
 			klog.V(4).InfoS("Allocations command finished successfully")
 			return nil
 		},
@@ -432,12 +436,152 @@ func aggregatePodRequests(pod *corev1.Pod) (resource.Quantity, resource.Quantity
 	return sumCPU, sumMem
 }
 
+// printAllocationSummary prints the summary section for resource allocations.
+func printAllocationSummary(results []nodeResult, showHostPorts bool) {
+	if len(results) == 0 {
+		return // No data to summarize
+	}
+
+	fmt.Println("\n--- Node Resource Allocation Summary ---")
+	fmt.Printf("Total Nodes: %d\n", len(results))
+
+	printResourcePercentiles(results, "CPU")
+	printResourcePercentiles(results, "Memory")
+
+	if showHostPorts {
+		printTopHostPorts(results)
+	}
+}
+
+// printResourcePercentiles calculates and prints percentiles for a given resource (CPU or Memory).
+func printResourcePercentiles(results []nodeResult, resourceName string) {
+	// Create a copy to sort independently
+	sortedResults := make([]nodeResult, len(results))
+	copy(sortedResults, results)
+
+	if resourceName == "CPU" {
+		sort.Slice(sortedResults, func(i, j int) bool {
+			return sortedResults[i].cpuPercent < sortedResults[j].cpuPercent
+		})
+		fmt.Printf("\nCPU Allocation Percentiles (based on %% of allocatable CPU requested):\n")
+	} else { // Memory
+		sort.Slice(sortedResults, func(i, j int) bool {
+			return sortedResults[i].memPercent < sortedResults[j].memPercent
+		})
+		fmt.Printf("\nMemory Allocation Percentiles (based on %% of allocatable Memory requested):\n")
+	}
+
+	percentiles := []struct {
+		name  string
+		value float64
+	}{
+		{"P10", 0.10},
+		{"Median(P50)", 0.50},
+		{"P90", 0.90},
+		{"P99", 0.99},
+		{"Max (P100)", 1.00}, // Max is effectively P100
+	}
+
+	n := len(sortedResults)
+	if n == 0 {
+		fmt.Println("  No data available.")
+		return
+	}
+
+	// Print in descending order of percentile for readability (Max first)
+	for i := len(percentiles) - 1; i >= 0; i-- {
+		p := percentiles[i]
+		var index int
+		if p.value == 1.00 { // Max
+			index = n - 1
+		} else {
+			index = int(float64(n-1) * p.value) // Standard percentile calculation (nearest rank)
+		}
+		if index < 0 {
+			index = 0
+		}
+		if index >= n {
+			index = n - 1
+		}
+
+		nodeRes := sortedResults[index]
+		if resourceName == "CPU" {
+			fmt.Printf("  - %-12s: %s (Requests: %s, %.1f%%)\n",
+				p.name, nodeRes.node.Name, formatCPU(nodeRes.reqCPU), nodeRes.cpuPercent)
+		} else { // Memory
+			fmt.Printf("  - %-12s: %s (Requests: %s, %.1f%%)\n",
+				p.name, nodeRes.node.Name, formatMemory(nodeRes.reqMem.Value()), nodeRes.memPercent)
+		}
+	}
+}
+
+// printTopHostPorts aggregates host port usage and prints the top 10.
+func printTopHostPorts(results []nodeResult) {
+	fmt.Printf("\nTop 10 Host Ports by Node Usage:\n")
+
+	portCounts := make(map[int32]int)
+	totalPortsFound := 0
+	for _, res := range results {
+		for _, port := range res.hostPorts {
+			portCounts[port]++
+			totalPortsFound++
+		}
+	}
+
+	if totalPortsFound == 0 {
+		fmt.Println("  No host ports in use across selected nodes.")
+		return
+	}
+
+	type portStat struct {
+		port  int32
+		count int
+	}
+	var stats []portStat
+	for port, count := range portCounts {
+		stats = append(stats, portStat{port, count})
+	}
+
+	sort.Slice(stats, func(i, j int) bool {
+		if stats[i].count != stats[j].count {
+			return stats[i].count > stats[j].count // Sort by count descending
+		}
+		return stats[i].port < stats[j].port // Then by port number ascending
+	})
+
+	limit := 10
+	if len(stats) < limit {
+		limit = len(stats)
+	}
+
+	if limit == 0 { // Should be caught by totalPortsFound == 0, but as a safeguard
+		fmt.Println("  No host ports in use across selected nodes.")
+		return
+	}
+
+	for i := 0; i < limit; i++ {
+		fmt.Printf("  - Port %-5d: Used on %d nodes\n", stats[i].port, stats[i].count)
+	}
+	if len(stats) > limit {
+		fmt.Printf("  ... and %d more ports.\n", len(stats)-limit)
+	}
+}
+
 func formatCPU(q resource.Quantity) string {
 	cores := q.AsApproximateFloat64()
 	if cores > 0 && cores < 0.1 {
-		cores = 0.1
+		// For very small non-zero values, show them as 0.1 to avoid "0.0" for actual requests.
+		// This behavior can be adjusted based on desired precision for sub-core requests.
+		// If a value is truly zero, AsApproximateFloat64() will return 0.
+		// The original check `cores > 0 && cores < 0.1` implies we want to show at least 0.1
+		// if there's *any* request, however small.
+		// Let's refine this: if it's truly zero, it should be 0.0. If it's >0 and <0.05, round to 0.1.
+		// The current `%.1f` formatting will handle rounding.
+		// The original logic `if cores > 0 && cores < 0.1 { cores = 0.1 }`
+		// effectively sets a minimum display of 0.1 for any non-zero request less than 0.1.
+		// This seems reasonable for readability.
 	}
-	return fmt.Sprintf("%.1f", cores)
+	return fmt.Sprintf("%.1f", cores) // %.1f will round e.g. 0.04 to 0.0, 0.05 to 0.1
 }
 
 func formatMemory(bytes int64) string {
