@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math"
 	"os"
-	"strconv"
 	"sync"
 	"text/tabwriter"
 	"time"
@@ -80,7 +79,7 @@ func newAllocationsCmd() *cobra.Command {
 
 			// Prepare table writer
 			tw := tabwriter.NewWriter(os.Stdout, 0, 8, 2, ' ', 0)
-			fmt.Fprintln(tw, "NODE\tAlloc_CPU\tAlloc_MEM\tReq_CPU\tReq_MEM\t%CPU\t%MEM")
+			fmt.Fprintln(tw, "NODE\tCPU\tMEM\tCPU REQ\tMEM REQ\tCPU%\tMEM%")
 
 			// Worker pool to concurrently list pods per node, limit max concurrent workers to 20
 			var wg sync.WaitGroup
@@ -129,18 +128,14 @@ func newAllocationsCmd() *cobra.Command {
 				allocCPU := res.node.Status.Allocatable.Cpu()
 				allocMem := res.node.Status.Allocatable.Memory()
 
-				// get percentage (if allocatable is non-zero)
-				percentCPU := computePercent(res.reqCPU, *allocCPU)
-				percentMem := computePercent(res.reqMem, *allocMem)
-
 				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 					res.node.Name,
-					allocCPU.String(),
-					allocMem.String(),
-					res.reqCPU.String(),
-					res.reqMem.String(),
-					percentCPU,
-					percentMem,
+					formatCPU(*allocCPU),
+					formatMemory(allocMem.Value()),
+					formatCPU(res.reqCPU),
+					formatMemory(res.reqMem.Value()),
+					formatPercent(res.reqCPU.AsApproximateFloat64(), allocCPU.AsApproximateFloat64()),
+					formatPercent(float64(res.reqMem.Value()), float64(allocMem.Value())),
 				)
 			}
 			tw.Flush()
@@ -167,7 +162,6 @@ func newUtilizationCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			// Metrics client configuration; note that QPS/Burst are less critical for metrics.
 			clientset, err := kubernetes.NewForConfig(config)
 			if err != nil {
 				return err
@@ -205,7 +199,7 @@ func newUtilizationCmd() *cobra.Command {
 
 			// Prepare table writer
 			tw := tabwriter.NewWriter(os.Stdout, 0, 8, 2, ' ', 0)
-			fmt.Fprintln(tw, "NODE\tAlloc_CPU\tAlloc_MEM\tAct_CPU\tAct_MEM\t%CPU\t%MEM")
+			fmt.Fprintln(tw, "NODE\tCPU\tMEM\tCPU USED\tMEM USED\tCPU USE%\tMEM USE%")
 			// Iterate over nodes and print metrics
 			for _, node := range nodeList.Items {
 				allocCPU := node.Status.Allocatable.Cpu()
@@ -219,16 +213,15 @@ func newUtilizationCmd() *cobra.Command {
 					actCPU = *resource.NewQuantity(0, resource.DecimalSI)
 					actMem = *resource.NewQuantity(0, resource.BinarySI)
 				}
-				percentCPU := computePercent(actCPU, *allocCPU)
-				percentMem := computePercent(actMem, *allocMem)
+
 				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 					node.Name,
-					allocCPU.String(),
-					allocMem.String(),
-					actCPU.String(),
-					actMem.String(),
-					percentCPU,
-					percentMem,
+					formatCPU(*allocCPU),
+					formatMemory(allocMem.Value()),
+					formatCPU(actCPU),
+					formatMemory(actMem.Value()),
+					formatPercent(actCPU.AsApproximateFloat64(), allocCPU.AsApproximateFloat64()),
+					formatPercent(float64(actMem.Value()), float64(allocMem.Value())),
 				)
 			}
 			tw.Flush()
@@ -281,13 +274,34 @@ func aggregatePodRequests(pod *corev1.Pod) (resource.Quantity, resource.Quantity
 	return sumCPU, sumMem
 }
 
-// computePercent returns the percentage of used relative to allocatable.
-func computePercent(used, alloc resource.Quantity) string {
-	allocFloat, _ := strconv.ParseFloat(alloc.String(), 64)
-	usedFloat, _ := strconv.ParseFloat(used.String(), 64)
-	if allocFloat == 0 {
+// formatCPU formats CPU quantities in decimal cores, with a minimum of 0.1 cores
+func formatCPU(q resource.Quantity) string {
+	cores := q.AsApproximateFloat64()
+	if cores > 0 && cores < 0.1 {
+		cores = 0.1
+	}
+	return fmt.Sprintf("%.1f", cores)
+}
+
+// formatMemory formats memory quantities in appropriate units (MiB/GiB)
+func formatMemory(bytes int64) string {
+	const (
+		mib = 1024 * 1024
+		gib = mib * 1024
+	)
+
+	switch {
+	case bytes >= gib:
+		return fmt.Sprintf("%.1fG", float64(bytes)/float64(gib))
+	default:
+		return fmt.Sprintf("%dM", bytes/mib)
+	}
+}
+
+// formatPercent formats the percentage with no decimal places
+func formatPercent(used, total float64) string {
+	if total == 0 {
 		return "N/A"
 	}
-	percent := (usedFloat / allocFloat) * 100
-	return fmt.Sprintf("%.0f%%", math.Round(percent))
+	return fmt.Sprintf("%.0f%%", math.Round((used/total)*100))
 }
