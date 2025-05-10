@@ -24,6 +24,13 @@ const (
 	SortByMemoryPercent = "memory-percent"
 	// SortByNodeName sorts nodes by name.
 	SortByNodeName = "name"
+
+	// SummaryShow shows the node list and prints the summary.
+	SummaryShow = "show"
+	// SummaryOnly only prints the summary.
+	SummaryOnly = "only"
+	// SummaryHide does not show the node summary.
+	SummaryHide = "hide"
 )
 
 // GetAllNodesWithPagination retrieves all nodes matching the label selector using pagination.
@@ -64,9 +71,9 @@ func FormatMemory(bytes int64) string {
 	)
 	switch {
 	case bytes >= gib:
-		return fmt.Sprintf("%.1fG", float64(bytes)/float64(gib))
+		return fmt.Sprintf("%.1fGi", float64(bytes)/float64(gib))
 	default:
-		return fmt.Sprintf("%dM", bytes/mib)
+		return fmt.Sprintf("%dMi", bytes/mib)
 	}
 }
 

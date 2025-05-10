@@ -31,8 +31,9 @@ import (
 func newUtilizationCmd(streams genericclioptions.IOStreams) *cobra.Command {
 	opts := genericclioptions.NewConfigFlags(true)
 	var (
-		sortBy   string
-		showFree bool // Added for --show-free
+		sortBy     string
+		showFree   bool // Added for --show-free
+		summaryOpt string
 	)
 
 	cmd := &cobra.Command{
@@ -45,29 +46,37 @@ of allocatable resources utilized.
 Nodes can be filtered by a label selector. This command requires the
 Kubernetes metrics-server to be installed and running in the cluster.`,
 		Example: `  # Show utilization for all nodes, sorted by CPU percentage
-  kubectl node-resources utilization "" --sort-by=cpu-percent
+  kubectl node-resources utilization --sort-by=cpu-percent
 
   # Show utilization for nodes with label 'role=worker'
   kubectl node-resources utilization "role=worker"`,
-		Args: cobra.ExactArgs(1),
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if sortBy != utils.SortByCPUPercent && sortBy != utils.SortByMemoryPercent && sortBy != utils.SortByNodeName {
 				return fmt.Errorf("invalid --sort-by value. Must be one of: %s, %s, %s", utils.SortByCPUPercent, utils.SortByMemoryPercent, utils.SortByNodeName)
 			}
-			klog.V(4).InfoS("Starting utilization command", "selector", args[0], "sortBy", sortBy, "showFree", showFree)
-			return runUtilization(cmd.Context(), opts, args[0], sortBy, showFree, streams)
+			if summaryOpt != utils.SummaryShow && summaryOpt != utils.SummaryOnly && summaryOpt != utils.SummaryHide {
+				return fmt.Errorf("invalid --summary value. Must be one of: %s, %s, %s", utils.SummaryShow, utils.SummaryOnly, utils.SummaryHide)
+			}
+			var selector string
+			if len(args) > 0 {
+				selector = args[0]
+			}
+			klog.V(4).InfoS("Starting utilization command", "selector", selector, "sortBy", sortBy, "showFree", showFree, "summary", summaryOpt)
+			return runUtilization(cmd.Context(), opts, selector, sortBy, showFree, summaryOpt, streams)
 		},
 	}
 
 	cmd.Flags().StringVar(&sortBy, "sort-by", utils.SortByCPUPercent, fmt.Sprintf("Sort nodes by: %s, %s, or %s", utils.SortByCPUPercent, utils.SortByMemoryPercent, utils.SortByNodeName))
 	cmd.Flags().BoolVar(&showFree, "show-free", false, "Show free CPU and Memory on each node") // Added flag
+	cmd.Flags().StringVar(&summaryOpt, "summary", utils.SummaryShow, fmt.Sprintf("Summary display option: %s, %s, or %s", utils.SummaryShow, utils.SummaryOnly, utils.SummaryHide))
 	opts.AddFlags(cmd.Flags())
 	return cmd
 }
 
 // runUtilization executes the core logic for the utilization command.
 // It fetches node data and metrics, calculates resource utilization, and prints the results.
-func runUtilization(ctx context.Context, configFlags *genericclioptions.ConfigFlags, nodeSelector string, sortBy string, showFree bool, streams genericclioptions.IOStreams) error {
+func runUtilization(ctx context.Context, configFlags *genericclioptions.ConfigFlags, nodeSelector string, sortBy string, showFree bool, summaryOpt string, streams genericclioptions.IOStreams) error {
 	config, err := configFlags.ToRESTConfig()
 	if err != nil {
 		return fmt.Errorf("failed to build Kubernetes client config: %w", err)
@@ -188,11 +197,16 @@ func runUtilization(ctx context.Context, configFlags *genericclioptions.ConfigFl
 		}
 		table.Append(rowValues)
 	}
-	table.Render()
+
+	if summaryOpt != utils.SummaryOnly {
+		table.Render()
+	}
 
 	// Call PrintUtilizationSummary from pkg/summary
-	// TODO: Update PrintUtilizationSummary if it needs to be aware of showFree
-	summary.PrintUtilizationSummary(results, streams.Out)
+	if summaryOpt == utils.SummaryShow || summaryOpt == utils.SummaryOnly {
+		// TODO: Update PrintUtilizationSummary if it needs to be aware of showFree
+		summary.PrintUtilizationSummary(results, streams.Out)
+	}
 
 	klog.V(4).InfoS("Utilization command finished successfully")
 	return nil

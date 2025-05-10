@@ -40,6 +40,7 @@ func newAllocationsCmd(streams genericclioptions.IOStreams) *cobra.Command {
 		sortBy        string
 		showHostPorts bool
 		showFree      bool // Added for --show-free
+		summaryOpt    string
 	)
 
 	cmd := &cobra.Command{
@@ -51,35 +52,46 @@ and the percentage of allocatable resources requested.
 
 Optionally, it can show host ports used by containers on each node.
 Nodes can be filtered by a label selector.`,
-		Example: `  # Show allocations for all nodes, sorted by CPU percentage
-  kubectl node-resources allocations "" --sort-by=cpu-percent
+		Example: `  # Show allocations for, sorted by CPU percentage
+  kubectl node-resources allocations --sort-by=cpu-percent
 
   # Show allocations for nodes with label 'role=worker', showing host ports
   kubectl node-resources allocations "role=worker" --show-host-ports
 
+  # Show only the allocation summary for nodes
+  kubectl node-resources allocations "role=worker" --summary=only
+
   # Show allocations for a specific node
   kubectl node-resources allocations "kubernetes.io/hostname=node1"`,
-		Args: cobra.ExactArgs(1),
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if sortBy != utils.SortByCPUPercent && sortBy != utils.SortByMemoryPercent && sortBy != utils.SortByNodeName {
 				return fmt.Errorf("invalid --sort-by value. Must be one of: %s, %s, %s", utils.SortByCPUPercent, utils.SortByMemoryPercent, utils.SortByNodeName)
 			}
-			klog.V(4).InfoS("Starting allocations command", "selector", args[0], "sortBy", sortBy, "showHostPorts", showHostPorts, "showFree", showFree)
+			if summaryOpt != utils.SummaryShow && summaryOpt != utils.SummaryOnly && summaryOpt != utils.SummaryHide {
+				return fmt.Errorf("invalid --summary value. Must be one of: %s, %s, %s", utils.SummaryShow, utils.SummaryOnly, utils.SummaryHide)
+			}
+			var selector string
+			if len(args) > 0 {
+				selector = args[0]
+			}
+			klog.V(4).InfoS("Starting allocations command", "selector", selector, "sortBy", sortBy, "showHostPorts", showHostPorts, "showFree", showFree, "summary", summaryOpt)
 
-			return runAllocations(cmd.Context(), opts, args[0], sortBy, showHostPorts, showFree, streams)
+			return runAllocations(cmd.Context(), opts, selector, sortBy, showHostPorts, showFree, summaryOpt, streams)
 		},
 	}
 
 	cmd.Flags().StringVar(&sortBy, "sort-by", utils.SortByCPUPercent, fmt.Sprintf("Sort nodes by: %s, %s, or %s", utils.SortByCPUPercent, utils.SortByMemoryPercent, utils.SortByNodeName))
 	cmd.Flags().BoolVar(&showHostPorts, "show-host-ports", false, "Show host ports used by containers on each node")
 	cmd.Flags().BoolVar(&showFree, "show-free", false, "Show free CPU and Memory on each node") // Added flag
+	cmd.Flags().StringVar(&summaryOpt, "summary", utils.SummaryShow, fmt.Sprintf("Summary display option: %s, %s, or %s", utils.SummaryShow, utils.SummaryOnly, utils.SummaryHide))
 	opts.AddFlags(cmd.Flags())
 	return cmd
 }
 
 // runAllocations executes the core logic for the allocations command.
 // It fetches node and pod data, calculates resource allocations, and prints the results.
-func runAllocations(ctx context.Context, configFlags *genericclioptions.ConfigFlags, nodeSelector string, sortBy string, showHostPorts bool, showFree bool, streams genericclioptions.IOStreams) error {
+func runAllocations(ctx context.Context, configFlags *genericclioptions.ConfigFlags, nodeSelector string, sortBy string, showHostPorts bool, showFree bool, summaryOpt string, streams genericclioptions.IOStreams) error {
 	config, err := configFlags.ToRESTConfig()
 	if err != nil {
 		return fmt.Errorf("failed to build Kubernetes client config: %w", err)
@@ -267,12 +279,17 @@ func runAllocations(ctx context.Context, configFlags *genericclioptions.ConfigFl
 		}
 		table.Append(rowValues)
 	}
-	table.Render()
+
+	if summaryOpt != utils.SummaryOnly {
+		table.Render()
+	}
 
 	// Call PrintAllocationSummary from pkg/summary
 	// Ensure streams.Out is passed, which implements io.Writer
-	// TODO: Update PrintAllocationSummary if it needs to be aware of showFree for total calculations
-	summary.PrintAllocationSummary(results, showHostPorts, streams.Out)
+	if summaryOpt == utils.SummaryShow || summaryOpt == utils.SummaryOnly {
+		// TODO: Update PrintAllocationSummary if it needs to be aware of showFree for total calculations
+		summary.PrintAllocationSummary(results, showHostPorts, streams.Out)
+	}
 
 	klog.V(4).InfoS("Allocations command finished successfully")
 	return nil
