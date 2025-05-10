@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"text/tabwriter"
 	"time"
@@ -27,6 +29,7 @@ type nodeResult struct {
 	reqMem     resource.Quantity
 	cpuPercent float64
 	memPercent float64
+	hostPorts  []int32
 }
 
 const (
@@ -40,7 +43,7 @@ func main() {
 	flag.Set("logtostderr", "true")
 
 	root := &cobra.Command{
-		Use:   "kubectl node-resources",
+		Use:   "kubectl-node-resources",
 		Short: "A kubectl plugin to show node resource allocations and utilization",
 	}
 
@@ -56,7 +59,10 @@ func main() {
 // newAllocationsCmd returns the allocations subcommand.
 func newAllocationsCmd() *cobra.Command {
 	opts := genericclioptions.NewConfigFlags(true)
-	var sortBy string
+	var (
+		sortBy        string
+		showHostPorts bool
+	)
 
 	cmd := &cobra.Command{
 		Use:   "allocations [node-selector]",
@@ -64,7 +70,7 @@ func newAllocationsCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if sortBy != sortByCPUPercent && sortBy != sortByMemoryPercent && sortBy != sortByNodeName {
-				return fmt.Errorf("invalid --sort-by value. Must be one of: cpu-percent, memory-percent, node-name")
+				return fmt.Errorf("invalid --sort-by value. Must be one of: cpu-percent, memory-percent, name")
 			}
 
 			nodeSelector := args[0]
@@ -99,7 +105,11 @@ func newAllocationsCmd() *cobra.Command {
 
 			// Prepare table writer
 			tw := tabwriter.NewWriter(os.Stdout, 0, 8, 2, ' ', 0)
-			fmt.Fprintln(tw, "NODE\tCPU\tMEM\tCPU REQ\tMEM REQ\tCPU%\tMEM%")
+			header := "NODE\tCPU\tMEM\tCPU REQ\tMEM REQ\tCPU%\tMEM%"
+			if showHostPorts {
+				header += "\tHOST PORTS"
+			}
+			fmt.Fprintln(tw, header)
 
 			// Worker pool to concurrently list pods per node, limit max concurrent workers to 20
 			var wg sync.WaitGroup
@@ -125,10 +135,31 @@ func newAllocationsCmd() *cobra.Command {
 
 					// Sum resource requests across pods.
 					var totalCPU, totalMem resource.Quantity
+					hostPortsMap := make(map[int32]struct{})
+
 					for _, pod := range podList.Items {
 						podCPU, podMem := aggregatePodRequests(&pod)
 						totalCPU.Add(podCPU)
 						totalMem.Add(podMem)
+
+						if showHostPorts {
+							// Collect host ports from all containers
+							for _, container := range pod.Spec.Containers {
+								for _, port := range container.Ports {
+									if port.HostPort > 0 {
+										hostPortsMap[port.HostPort] = struct{}{}
+									}
+								}
+							}
+							// Check init containers too
+							for _, container := range pod.Spec.InitContainers {
+								for _, port := range container.Ports {
+									if port.HostPort > 0 {
+										hostPortsMap[port.HostPort] = struct{}{}
+									}
+								}
+							}
+						}
 					}
 
 					allocCPU := node.Status.Allocatable.Cpu()
@@ -136,12 +167,22 @@ func newAllocationsCmd() *cobra.Command {
 					cpuPercent := calculatePercent(totalCPU.AsApproximateFloat64(), allocCPU.AsApproximateFloat64())
 					memPercent := calculatePercent(float64(totalMem.Value()), float64(allocMem.Value()))
 
+					// Convert host ports map to sorted slice
+					var hostPorts []int32
+					if showHostPorts {
+						for port := range hostPortsMap {
+							hostPorts = append(hostPorts, port)
+						}
+						sort.Slice(hostPorts, func(i, j int) bool { return hostPorts[i] < hostPorts[j] })
+					}
+
 					results[i] = nodeResult{
 						node:       node,
 						reqCPU:     totalCPU,
 						reqMem:     totalMem,
 						cpuPercent: cpuPercent,
 						memPercent: memPercent,
+						hostPorts:  hostPorts,
 					}
 				}(i, node)
 			}
@@ -155,7 +196,7 @@ func newAllocationsCmd() *cobra.Command {
 				allocCPU := res.node.Status.Allocatable.Cpu()
 				allocMem := res.node.Status.Allocatable.Memory()
 
-				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%.1f%%\t%.1f%%\n",
+				row := fmt.Sprintf("%s\t%s\t%s\t%s\t%s\t%.1f%%\t%.1f%%",
 					res.node.Name,
 					formatCPU(*allocCPU),
 					formatMemory(allocMem.Value()),
@@ -164,6 +205,20 @@ func newAllocationsCmd() *cobra.Command {
 					res.cpuPercent,
 					res.memPercent,
 				)
+
+				if showHostPorts {
+					portStrings := make([]string, len(res.hostPorts))
+					for i, port := range res.hostPorts {
+						portStrings[i] = strconv.Itoa(int(port))
+					}
+					if len(portStrings) == 0 {
+						row += "\t-"
+					} else {
+						row += "\t" + strings.Join(portStrings, ",")
+					}
+				}
+
+				fmt.Fprintln(tw, row)
 			}
 			tw.Flush()
 			return nil
@@ -172,6 +227,7 @@ func newAllocationsCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&sortBy, "sort-by", sortByCPUPercent,
 		fmt.Sprintf("Sort nodes by: %s, %s, or %s", sortByCPUPercent, sortByMemoryPercent, sortByNodeName))
+	cmd.Flags().BoolVar(&showHostPorts, "show-host-ports", false, "Show host ports used by containers on each node")
 
 	// Add genericclioptions flags to the command
 	opts.AddFlags(cmd.Flags())
