@@ -45,12 +45,12 @@ func rgbTo256ColorIndex(r, g, b int) int {
 	return 16 + (rIdx * 36) + (gIdx * 6) + bIdx
 }
 
-// GetColorForPercentage returns an ANSI escape code string for a foreground color
+// PercentFontColor returns an ANSI escape code string for a foreground color
 // representing the given percentage on a green-yellow-red gradient.
 // Percentages are clamped to the 0-100 range.
 // 0-50% transitions from green to yellow.
 // 50-100% transitions from yellow to red.
-func GetColorForPercentage(percentage float64) string {
+func PercentFontColor(percentage float64) string {
 	// Clamp percentage to the 0-100 range
 	p := math.Max(0, math.Min(100, percentage))
 
@@ -72,4 +72,33 @@ func GetColorForPercentage(percentage float64) string {
 
 	colorIndex := rgbTo256ColorIndex(r, g, b)
 	return fmt.Sprintf("\033[38;5;%dm", colorIndex)
+}
+
+// PercentBackgroundColor returns an ANSI escape code string for a background color
+// representing the given percentage on a green-yellow-red gradient.
+// Percentages are clamped to the 0-100 range.
+// 0-50% transitions from green to yellow.
+// 50-100% transitions from yellow to red.
+func PercentBackgroundColor(percentage float64) string {
+	// Clamp percentage to the 0-100 range
+	p := math.Max(0, math.Min(100, percentage))
+
+	var r, g, b int
+
+	if p <= 50 {
+		// Gradient from Green (0,255,0) to Yellow (255,255,0)
+		factor := p / 50.0
+		r = interpolateComponent(0, 255, factor) // Red component increases
+		g = 255                                  // Green component stays max
+		b = 0                                    // Blue component stays min
+	} else {
+		// Gradient from Yellow (255,255,0) to Red (255,0,0)
+		factor := (p - 50.0) / 50.0
+		r = 255                                  // Red component stays max
+		g = interpolateComponent(255, 0, factor) // Green component decreases
+		b = 0                                    // Blue component stays min
+	}
+
+	colorIndex := rgbTo256ColorIndex(r, g, b)
+	return fmt.Sprintf("\033[48;5;%dm", colorIndex)
 }

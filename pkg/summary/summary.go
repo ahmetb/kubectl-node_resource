@@ -119,7 +119,7 @@ func printResourcePercentiles(results []utils.NodeResult, summaryContext string,
 		}
 		fmt.Fprintf(out, "  - %-12s: %s (%s: %s, %s%.1f%%%s)\n",
 			p.name, nodeRes.Node.Name, strings.Title(contextVerb), valueString,
-			ui.GetColorForPercentage(percentValue), percentValue, ui.ColorReset)
+			ui.PercentFontColor(percentValue), percentValue, ui.ColorReset)
 	}
 }
 

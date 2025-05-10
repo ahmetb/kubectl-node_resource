@@ -27,6 +27,7 @@ import (
 	// Corrected import path for utils package
 	"kubectl-node_resources/pkg/summary"
 	"kubectl-node_resources/pkg/utils"
+
 	// TODO: Import progressbar utils from their new pkg location once moved
 	"kubectl-node_resources/pkg/ui"
 )
@@ -38,6 +39,7 @@ func newAllocationsCmd(streams genericclioptions.IOStreams) *cobra.Command {
 	var (
 		sortBy        string
 		showHostPorts bool
+		showFree      bool // Added for --show-free
 	)
 
 	cmd := &cobra.Command{
@@ -62,21 +64,22 @@ Nodes can be filtered by a label selector.`,
 			if sortBy != utils.SortByCPUPercent && sortBy != utils.SortByMemoryPercent && sortBy != utils.SortByNodeName {
 				return fmt.Errorf("invalid --sort-by value. Must be one of: %s, %s, %s", utils.SortByCPUPercent, utils.SortByMemoryPercent, utils.SortByNodeName)
 			}
-			klog.V(4).InfoS("Starting allocations command", "selector", args[0], "sortBy", sortBy, "showHostPorts", showHostPorts)
+			klog.V(4).InfoS("Starting allocations command", "selector", args[0], "sortBy", sortBy, "showHostPorts", showHostPorts, "showFree", showFree)
 
-			return runAllocations(cmd.Context(), opts, args[0], sortBy, showHostPorts, streams)
+			return runAllocations(cmd.Context(), opts, args[0], sortBy, showHostPorts, showFree, streams)
 		},
 	}
 
 	cmd.Flags().StringVar(&sortBy, "sort-by", utils.SortByCPUPercent, fmt.Sprintf("Sort nodes by: %s, %s, or %s", utils.SortByCPUPercent, utils.SortByMemoryPercent, utils.SortByNodeName))
 	cmd.Flags().BoolVar(&showHostPorts, "show-host-ports", false, "Show host ports used by containers on each node")
+	cmd.Flags().BoolVar(&showFree, "show-free", false, "Show free CPU and Memory on each node") // Added flag
 	opts.AddFlags(cmd.Flags())
 	return cmd
 }
 
 // runAllocations executes the core logic for the allocations command.
 // It fetches node and pod data, calculates resource allocations, and prints the results.
-func runAllocations(ctx context.Context, configFlags *genericclioptions.ConfigFlags, nodeSelector string, sortBy string, showHostPorts bool, streams genericclioptions.IOStreams) error {
+func runAllocations(ctx context.Context, configFlags *genericclioptions.ConfigFlags, nodeSelector string, sortBy string, showHostPorts bool, showFree bool, streams genericclioptions.IOStreams) error {
 	config, err := configFlags.ToRESTConfig()
 	if err != nil {
 		return fmt.Errorf("failed to build Kubernetes client config: %w", err)
@@ -100,13 +103,6 @@ func runAllocations(ctx context.Context, configFlags *genericclioptions.ConfigFl
 		fmt.Fprintln(streams.Out, "No nodes found with the given selector.")
 		return nil
 	}
-
-	tw := tabwriter.NewWriter(streams.Out, 0, 8, 2, ' ', 0)
-	header := "NODE\tCPU\tMEM\tCPU REQ\tMEM REQ\tCPU%\tMEM%"
-	if showHostPorts {
-		header += "\tHOST PORTS"
-	}
-	fmt.Fprintln(tw, header)
 
 	results := make([]utils.NodeResult, len(allNodes))
 
@@ -164,6 +160,18 @@ func runAllocations(ctx context.Context, configFlags *genericclioptions.ConfigFl
 			cpuPercent := utils.CalculatePercent(totalCPU.AsApproximateFloat64(), allocCPU.AsApproximateFloat64())
 			memPercent := utils.CalculatePercent(float64(totalMem.Value()), float64(allocMem.Value()))
 
+			freeCPU := allocCPU.DeepCopy()
+			freeCPU.Sub(totalCPU)
+			if freeCPU.Sign() < 0 { // Ensure free is not negative
+				freeCPU = *resource.NewQuantity(0, resource.DecimalSI)
+			}
+
+			freeMem := allocMem.DeepCopy()
+			freeMem.Sub(totalMem)
+			if freeMem.Sign() < 0 { // Ensure free is not negative
+				freeMem = *resource.NewQuantity(0, resource.BinarySI)
+			}
+
 			var currentHostPorts []int32
 			if showHostPorts {
 				for port := range hostPortsMap {
@@ -179,8 +187,10 @@ func runAllocations(ctx context.Context, configFlags *genericclioptions.ConfigFl
 				CPUPercent: cpuPercent,
 				MemPercent: memPercent,
 				HostPorts:  currentHostPorts,
+				FreeCPU:    freeCPU, // Store calculated free CPU
+				FreeMem:    freeMem, // Store calculated free Memory
 			}
-			klog.V(5).InfoS("Finished processing node", "nodeName", node.Name, "reqCPU", totalCPU.String(), "reqMem", totalMem.String())
+			klog.V(5).InfoS("Finished processing node", "nodeName", node.Name, "reqCPU", totalCPU.String(), "reqMem", totalMem.String(), "freeCPU", freeCPU.String(), "freeMem", freeMem.String())
 
 			if progressHelper != nil {
 				// Pass the same prefix, or an updated one if needed for this stage
@@ -207,18 +217,30 @@ func runAllocations(ctx context.Context, configFlags *genericclioptions.ConfigFl
 	utils.SortResults(results, sortBy)
 	klog.V(4).InfoS("Results sorted", "sortBy", sortBy)
 
+	// First collect all formatted rows
+	rows := make([]string, 0, len(results))
 	for _, res := range results {
 		allocCPU := res.Node.Status.Allocatable.Cpu()
 		allocMem := res.Node.Status.Allocatable.Memory()
 
-		cpuColor := ui.GetColorForPercentage(res.CPUPercent)
-		memColor := ui.GetColorForPercentage(res.MemPercent)
+		cpuColor := ui.PercentFontColor(res.CPUPercent)
+		memColor := ui.PercentFontColor(res.MemPercent)
 
-		row := fmt.Sprintf("%s\t%s\t%s\t%s\t%s\t%s%.1f%%%s\t%s%.1f%%%s",
-			res.Node.Name, utils.FormatCPU(*allocCPU), utils.FormatMemory(allocMem.Value()),
-			utils.FormatCPU(res.ReqCPU), utils.FormatMemory(res.ReqMem.Value()),
+		row := fmt.Sprintf("%s\t%s\t%s\t%s%.1f%%%s\t%s\t%s\t%s%.1f%%%s",
+			res.Node.Name, utils.FormatCPU(*allocCPU),
+			utils.FormatCPU(res.ReqCPU),
 			cpuColor, res.CPUPercent, ui.ColorReset,
+			utils.FormatMemory(allocMem.Value()),
+			utils.FormatMemory(res.ReqMem.Value()),
 			memColor, res.MemPercent, ui.ColorReset)
+
+		if showFree {
+			freeCPUColor := ui.PercentBackgroundColor(100 - res.CPUPercent)
+			freeMemColor := ui.PercentBackgroundColor(100 - res.MemPercent)
+			row += fmt.Sprintf("\t%s%s%s\t%s%s%s",
+				freeCPUColor, utils.FormatCPU(res.FreeCPU), ui.ColorReset,
+				freeMemColor, utils.FormatMemory(res.FreeMem.Value()), ui.ColorReset)
+		}
 
 		if showHostPorts {
 			portStrings := make([]string, len(res.HostPorts))
@@ -231,12 +253,31 @@ func runAllocations(ctx context.Context, configFlags *genericclioptions.ConfigFl
 				row += "\t" + strings.Join(portStrings, ",")
 			}
 		}
+		rows = append(rows, row)
+	}
+
+	// Now configure tabwriter
+	tw := tabwriter.NewWriter(streams.Out, 0, 0, 2, ' ', 0)
+
+	// Define header
+	header := "NODE    CPU    CPU REQ    CPU%    MEMORY    MEM REQ    MEM%"
+	if showFree {
+		header += "    FREE CPU    FREE MEMORY"
+	}
+	if showHostPorts {
+		header += "    HOST PORTS"
+	}
+	fmt.Fprintln(tw, header)
+
+	// Print all collected rows
+	for _, row := range rows {
 		fmt.Fprintln(tw, row)
 	}
 	tw.Flush()
 
 	// Call PrintAllocationSummary from pkg/summary
 	// Ensure streams.Out is passed, which implements io.Writer
+	// TODO: Update PrintAllocationSummary if it needs to be aware of showFree for total calculations
 	summary.PrintAllocationSummary(results, showHostPorts, streams.Out)
 
 	klog.V(4).InfoS("Allocations command finished successfully")

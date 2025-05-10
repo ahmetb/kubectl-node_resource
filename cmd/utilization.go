@@ -28,7 +28,10 @@ import (
 // This command displays actual node resource utilization (similar to 'kubectl top node').
 func newUtilizationCmd(streams genericclioptions.IOStreams) *cobra.Command {
 	opts := genericclioptions.NewConfigFlags(true)
-	var sortBy string
+	var (
+		sortBy   string
+		showFree bool // Added for --show-free
+	)
 
 	cmd := &cobra.Command{
 		Use:   "utilization [node-selector]",
@@ -49,19 +52,20 @@ Kubernetes metrics-server to be installed and running in the cluster.`,
 			if sortBy != utils.SortByCPUPercent && sortBy != utils.SortByMemoryPercent && sortBy != utils.SortByNodeName {
 				return fmt.Errorf("invalid --sort-by value. Must be one of: %s, %s, %s", utils.SortByCPUPercent, utils.SortByMemoryPercent, utils.SortByNodeName)
 			}
-			klog.V(4).InfoS("Starting utilization command", "selector", args[0], "sortBy", sortBy)
-			return runUtilization(cmd.Context(), opts, args[0], sortBy, streams)
+			klog.V(4).InfoS("Starting utilization command", "selector", args[0], "sortBy", sortBy, "showFree", showFree)
+			return runUtilization(cmd.Context(), opts, args[0], sortBy, showFree, streams)
 		},
 	}
 
 	cmd.Flags().StringVar(&sortBy, "sort-by", utils.SortByCPUPercent, fmt.Sprintf("Sort nodes by: %s, %s, or %s", utils.SortByCPUPercent, utils.SortByMemoryPercent, utils.SortByNodeName))
+	cmd.Flags().BoolVar(&showFree, "show-free", false, "Show free CPU and Memory on each node") // Added flag
 	opts.AddFlags(cmd.Flags())
 	return cmd
 }
 
 // runUtilization executes the core logic for the utilization command.
 // It fetches node data and metrics, calculates resource utilization, and prints the results.
-func runUtilization(ctx context.Context, configFlags *genericclioptions.ConfigFlags, nodeSelector string, sortBy string, streams genericclioptions.IOStreams) error {
+func runUtilization(ctx context.Context, configFlags *genericclioptions.ConfigFlags, nodeSelector string, sortBy string, showFree bool, streams genericclioptions.IOStreams) error {
 	config, err := configFlags.ToRESTConfig()
 	if err != nil {
 		return fmt.Errorf("failed to build Kubernetes client config: %w", err)
@@ -119,12 +123,26 @@ func runUtilization(ctx context.Context, configFlags *genericclioptions.ConfigFl
 			actMem = *resource.NewQuantity(0, resource.BinarySI)
 		}
 
+		freeCPU := allocCPU.DeepCopy()
+		freeCPU.Sub(actCPU)
+		if freeCPU.Sign() < 0 {
+			freeCPU = *resource.NewQuantity(0, resource.DecimalSI)
+		}
+
+		freeMem := allocMem.DeepCopy()
+		freeMem.Sub(actMem)
+		if freeMem.Sign() < 0 {
+			freeMem = *resource.NewQuantity(0, resource.BinarySI)
+		}
+
 		results[i] = utils.NodeResult{
 			Node:       node,
 			ReqCPU:     actCPU, // For utilization, ReqCPU/Mem store actual used resources
 			ReqMem:     actMem,
 			CPUPercent: utils.CalculatePercent(actCPU.AsApproximateFloat64(), allocCPU.AsApproximateFloat64()),
 			MemPercent: utils.CalculatePercent(float64(actMem.Value()), float64(allocMem.Value())),
+			FreeCPU:    freeCPU, // Store calculated free CPU
+			FreeMem:    freeMem, // Store calculated free Memory
 			// HostPorts are not relevant for utilization command
 		}
 	}
@@ -132,25 +150,51 @@ func runUtilization(ctx context.Context, configFlags *genericclioptions.ConfigFl
 	utils.SortResults(results, sortBy)
 	klog.V(4).InfoS("Utilization results sorted", "sortBy", sortBy)
 
-	tw := tabwriter.NewWriter(streams.Out, 0, 8, 2, ' ', 0)
-	fmt.Fprintln(tw, "NODE\tCPU\tMEM\tCPU USED\tMEM USED\tCPU USE%\tMEM USE%")
-
+	// First collect all formatted rows
+	rows := make([]string, 0, len(results))
 	for _, res := range results {
 		allocCPU := res.Node.Status.Allocatable.Cpu()
 		allocMem := res.Node.Status.Allocatable.Memory()
 
-		cpuColor := ui.GetColorForPercentage(res.CPUPercent)
-		memColor := ui.GetColorForPercentage(res.MemPercent)
+		cpuColor := ui.PercentFontColor(res.CPUPercent)
+		memColor := ui.PercentFontColor(res.MemPercent)
 
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s%.1f%%%s\t%s%.1f%%%s\n",
-			res.Node.Name, utils.FormatCPU(*allocCPU), utils.FormatMemory(allocMem.Value()),
-			utils.FormatCPU(res.ReqCPU), utils.FormatMemory(res.ReqMem.Value()), // ReqCPU/Mem store actual usage here
+		row := fmt.Sprintf("%s\t%s\t%s\t%s%.1f%%%s\t%s\t%s\t%s%.1f%%%s",
+			res.Node.Name, utils.FormatCPU(*allocCPU),
+			utils.FormatCPU(res.ReqCPU),
 			cpuColor, res.CPUPercent, ui.ColorReset,
+			utils.FormatMemory(allocMem.Value()),
+			utils.FormatMemory(res.ReqMem.Value()),
 			memColor, res.MemPercent, ui.ColorReset)
+
+		if showFree {
+			freeCPUColor := ui.PercentBackgroundColor(100 - res.CPUPercent)
+			freeMemColor := ui.PercentBackgroundColor(100 - res.MemPercent)
+			row += fmt.Sprintf("\t%s%s%s\t%s%s%s",
+				freeCPUColor, utils.FormatCPU(res.FreeCPU), ui.ColorReset,
+				freeMemColor, utils.FormatMemory(res.FreeMem.Value()), ui.ColorReset)
+		}
+		rows = append(rows, row)
+	}
+
+	// Now create and configure the tabwriter
+	tw := tabwriter.NewWriter(streams.Out, 0, 0, 2, ' ', 0)
+
+	// Define the header after we know what columns we'll display
+	header := "NODE    CPU    CPU USED    CPU%    MEMORY    MEM USED    MEM%"
+	if showFree {
+		header += "    FREE CPU    FREE MEMORY"
+	}
+	fmt.Fprintln(tw, header)
+
+	// Print all collected rows
+	for _, row := range rows {
+		fmt.Fprintln(tw, row)
 	}
 	tw.Flush()
 
 	// Call PrintUtilizationSummary from pkg/summary
+	// TODO: Update PrintUtilizationSummary if it needs to be aware of showFree
 	summary.PrintUtilizationSummary(results, streams.Out)
 
 	klog.V(4).InfoS("Utilization command finished successfully")
