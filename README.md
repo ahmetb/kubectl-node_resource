@@ -57,12 +57,10 @@ resource pressure on each node.
 - **Flexible Sorting and Filtering**: Sort nodes by CPU/memory usage percentage.
 - **Free Resource Display**: In addition to showing used resources, it can also display
   the free resources (`--show-free`) on each node.
-- **Host Port Display**: Displays host ports used by containers on nodes
-  (`--show-host-ports`).
 - **Selective Resource Display**: Allows users to choose which resources (CPU,
   Memory, Ephemeral Storage, Host Ports) are displayed in the output using flags
-  like `--show-cpu`, `--show-memory`, `--show-ephemeral-storage`, and
-  `--show-host-ports`.
+  like `--show-cpu`, `--show-memory`, `--show-gpu`, `--show-ephemeral-storage`,
+  and `--show-host-ports`.
 
 ## Usage
 
