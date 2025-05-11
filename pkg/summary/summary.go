@@ -4,6 +4,7 @@ package summary
 import (
 	"fmt"
 	"io"
+	"math"
 	"sort"
 	"strings"
 
@@ -152,8 +153,6 @@ func GetNodeResourceSummaryData(results []utils.NodeResult, showHostPorts bool, 
 	return summary, nil
 }
 
-// --- Existing print functions (will be refactored to use new data functions) ---
-
 // PrintNodeResourceSummary prints the summary section for resource allocation or utilization.
 // It includes total nodes and percentiles for CPU and Memory.
 // If cmdType is "allocation" and showHostPorts is true, it also prints top host port usage.
@@ -180,7 +179,9 @@ func PrintNodeResourceSummary(results []utils.NodeResult, showHostPorts bool, ou
 	fmt.Fprintf(out, "Total Nodes: %d\n", len(results))
 
 	printResourcePercentiles(results, summaryContext, "CPU", out)
+	printResourceDistributionHistogram(results, summaryContext, "CPU", out) // New histogram
 	printResourcePercentiles(results, summaryContext, "Memory", out)
+	printResourceDistributionHistogram(results, summaryContext, "Memory", out) // New histogram
 
 	if cmdType == output.CmdTypeAllocation && showHostPorts {
 		printTopHostPorts(results, out)
@@ -252,9 +253,85 @@ func printResourcePercentiles(results []utils.NodeResult, summaryContext string,
 			percentValue = nodeRes.MemPercent
 		}
 		// Use DisplayName for text output, ensure sufficient padding for potentially longer names
+		// Removed the per-percentile bar chart from here
 		fmt.Fprintf(out, "  - %-15s: %s (%s: %s, %s%.1f%%%s)\n",
 			pDef.DisplayName, nodeRes.Node.Name, strings.Title(contextVerb), valueString,
 			ui.PercentFontColor(percentValue), percentValue, ui.ColorReset)
+	}
+}
+
+// printResourceDistributionHistogram prints a histogram of node distribution across utilization/allocation buckets.
+func printResourceDistributionHistogram(results []utils.NodeResult, summaryContext string, resourceName string, out io.Writer) {
+	if len(results) == 0 {
+		return
+	}
+
+	var contextVerb string
+	if summaryContext == "Allocation" {
+		contextVerb = "requested"
+	} else { // Utilization
+		contextVerb = "used"
+	}
+
+	fmt.Fprintf(out, "\n%s %s Distribution (%% of allocatable %s %s):\n", resourceName, summaryContext, resourceName, contextVerb)
+
+	// Define buckets (0-10, 10-20, ..., 90-100)
+	numBuckets := 10
+	buckets := make([]int, numBuckets)
+	bucketSize := 10.0 // Each bucket represents 10%
+
+	for _, res := range results {
+		var percentValue float64
+		if resourceName == "CPU" {
+			percentValue = res.CPUPercent
+		} else { // Memory
+			percentValue = res.MemPercent
+		}
+
+		bucketIndex := int(math.Floor(percentValue / bucketSize))
+		if bucketIndex >= numBuckets { // Handle 100% case
+			bucketIndex = numBuckets - 1
+		}
+		if bucketIndex < 0 { // Should not happen if percentValue is >= 0
+			bucketIndex = 0
+		}
+		buckets[bucketIndex]++
+	}
+
+	maxNodesInBucket := 0
+	for _, count := range buckets {
+		if count > maxNodesInBucket {
+			maxNodesInBucket = count
+		}
+	}
+
+	// Max bar width for the histogram
+	maxBarWidth := 40
+	if maxNodesInBucket == 0 { // Avoid division by zero if all buckets are empty (though results shouldn't be empty here)
+		maxBarWidth = 1 // or handle as "no data"
+	}
+
+	for i := 0; i < numBuckets; i++ {
+		lowerBound := i * int(bucketSize)
+		upperBound := (i + 1) * int(bucketSize)
+		label := fmt.Sprintf("%2d-%3d%%", lowerBound, upperBound)
+		if i == numBuckets-1 { // Last bucket is inclusive of 100%
+			label = fmt.Sprintf("%2d-%3d%%", lowerBound, 100)
+		}
+
+		nodeCount := buckets[i]
+		barLength := 0
+		if maxNodesInBucket > 0 { // Calculate bar length only if there's data
+			barLength = int(math.Round((float64(nodeCount) / float64(maxNodesInBucket)) * float64(maxBarWidth)))
+		}
+
+		bar := strings.Repeat("█", barLength)
+
+		// Determine color based on the midpoint of the bucket for representative coloring
+		bucketMidPointPercent := float64(lowerBound) + bucketSize/2.0
+		color := ui.PercentFontColor(bucketMidPointPercent)
+
+		fmt.Fprintf(out, "  %s : %s%s%s (%d nodes)\n", label, color, bar, ui.ColorReset, nodeCount)
 	}
 }
 
