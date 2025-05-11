@@ -26,12 +26,14 @@ import (
 	"kubectl-node_resources/pkg/percentiles" // Added for percentile definitions
 	"kubectl-node_resources/pkg/ui"
 	"kubectl-node_resources/pkg/utils"
+
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 // --- Functions to get summary data as structs ---
 
 // GetResourcePercentilesData calculates and returns percentiles for a given resource.
-func GetResourcePercentilesData(results []utils.NodeResult, resourceName string, summaryContext string) []output.JSONPercentileDetail {
+func GetResourcePercentilesData(results []utils.NodeResult, resourceName string, summaryContext string, showEphemeralStorage bool) []output.JSONPercentileDetail { // Added showEphemeralStorage
 	if len(results) == 0 {
 		return []output.JSONPercentileDetail{}
 	}
@@ -39,14 +41,24 @@ func GetResourcePercentilesData(results []utils.NodeResult, resourceName string,
 	sortedResults := make([]utils.NodeResult, len(results))
 	copy(sortedResults, results)
 
-	if resourceName == "CPU" {
+	switch resourceName {
+	case "CPU":
 		sort.Slice(sortedResults, func(i, j int) bool {
 			return sortedResults[i].CPUPercent < sortedResults[j].CPUPercent
 		})
-	} else { // Memory
+	case "Memory":
 		sort.Slice(sortedResults, func(i, j int) bool {
 			return sortedResults[i].MemPercent < sortedResults[j].MemPercent
 		})
+	case "EphemeralStorage":
+		if !showEphemeralStorage { // Should not be called if false, but defensive
+			return []output.JSONPercentileDetail{}
+		}
+		sort.Slice(sortedResults, func(i, j int) bool {
+			return sortedResults[i].EphemeralStoragePercent < sortedResults[j].EphemeralStoragePercent
+		})
+	default:
+		return []output.JSONPercentileDetail{} // Should not happen
 	}
 
 	n := len(sortedResults)
@@ -75,12 +87,16 @@ func GetResourcePercentilesData(results []utils.NodeResult, resourceName string,
 		var valueString string
 		var percentValue float64
 
-		if resourceName == "CPU" {
+		switch resourceName {
+		case "CPU":
 			valueString = utils.FormatCPU(nodeRes.ReqCPU)
 			percentValue = nodeRes.CPUPercent
-		} else { // Memory
+		case "Memory":
 			valueString = utils.FormatMemory(nodeRes.ReqMem.Value())
 			percentValue = nodeRes.MemPercent
+		case "EphemeralStorage":
+			valueString = utils.FormatMemory(nodeRes.ReqEphemeralStorage.Value()) // Assuming FormatMemory is suitable
+			percentValue = nodeRes.EphemeralStoragePercent
 		}
 		jsonData = append(jsonData, output.JSONPercentileDetail{
 			Percentile: pDef.Codename, // Use Codename for JSON
@@ -141,47 +157,90 @@ func GetTopHostPortsData(results []utils.NodeResult) []output.JSONHostPortSummar
 }
 
 // GetNodeResourceSummaryData prepares the full summary data for a given command type.
-func GetNodeResourceSummaryData(results []utils.NodeResult, showHostPorts bool, cmdType string) (*output.JSONSummary, error) {
+func GetNodeResourceSummaryData(results []utils.NodeResult, showHostPorts bool, showEphemeralStorage bool, cmdType utils.CmdType) (*output.JSONSummary, error) {
 	if len(results) == 0 {
-		return nil, nil // Or an empty summary, depending on desired JSON output for no results
+		return nil, nil
 	}
 
 	var summaryContext string
-	if cmdType == output.CmdTypeAllocation {
+	var totalCPUAlloc, totalMemAlloc, totalEphAlloc float64
+	var totalCPUReqOrUsed, totalMemReqOrUsed, totalEphReqOrUsed float64
+	var sumCPUPercent, sumMemPercent, sumEphPercent float64
+
+	if cmdType == utils.CmdTypeAllocation {
 		summaryContext = "Allocation"
-	} else if cmdType == output.CmdTypeUtilization {
+	} else if cmdType == utils.CmdTypeUtilization {
 		summaryContext = "Utilization"
 	} else {
 		return nil, fmt.Errorf("unknown command type for summary: %s", cmdType)
 	}
 
-	summary := &output.JSONSummary{
-		TotalNodes:        len(results),
-		CPUPercentiles:    GetResourcePercentilesData(results, "CPU", summaryContext),
-		MemoryPercentiles: GetResourcePercentilesData(results, "Memory", summaryContext),
+	for _, res := range results {
+		totalCPUAlloc += res.Node.Status.Allocatable.Cpu().AsApproximateFloat64()
+		totalMemAlloc += float64(res.Node.Status.Allocatable.Memory().Value())
+		totalCPUReqOrUsed += res.ReqCPU.AsApproximateFloat64()
+		totalMemReqOrUsed += float64(res.ReqMem.Value())
+		sumCPUPercent += res.CPUPercent
+		sumMemPercent += res.MemPercent
+		if showEphemeralStorage {
+			totalEphAlloc += float64(res.AllocEphemeralStorage.Value())
+			totalEphReqOrUsed += float64(res.ReqEphemeralStorage.Value())
+			sumEphPercent += res.EphemeralStoragePercent
+		}
 	}
 
-	if cmdType == output.CmdTypeAllocation && showHostPorts {
+	avgCPUPercent := 0.0
+	avgMemPercent := 0.0
+	avgEphPercent := 0.0
+	if len(results) > 0 {
+		avgCPUPercent = sumCPUPercent / float64(len(results))
+		avgMemPercent = sumMemPercent / float64(len(results))
+		if showEphemeralStorage {
+			avgEphPercent = sumEphPercent / float64(len(results))
+		}
+	}
+
+	// TODO: Update GetResourcePercentilesData to accept showEphemeralStorage and handle ephemeral storage percentiles
+	summary := &output.JSONSummary{
+		TotalNodes:                 len(results),
+		TotalCPUAllocatable:        utils.FormatCPU(*resource.NewMilliQuantity(int64(totalCPUAlloc*1000), resource.DecimalSI)),
+		TotalCPURequestedOrUsed:    utils.FormatCPU(*resource.NewMilliQuantity(int64(totalCPUReqOrUsed*1000), resource.DecimalSI)),
+		AverageCPUPercent:          avgCPUPercent,
+		TotalMemoryAllocatable:     utils.FormatMemory(int64(totalMemAlloc)),
+		TotalMemoryRequestedOrUsed: utils.FormatMemory(int64(totalMemReqOrUsed)),
+		AverageMemoryPercent:       avgMemPercent,
+		CPUPercentiles:             GetResourcePercentilesData(results, "CPU", summaryContext, showEphemeralStorage),
+		MemoryPercentiles:          GetResourcePercentilesData(results, "Memory", summaryContext, showEphemeralStorage),
+	}
+
+	if showEphemeralStorage {
+		summary.TotalEphemeralAllocatable = utils.FormatMemory(int64(totalEphAlloc))
+		summary.TotalEphemeralRequestedOrUsed = utils.FormatMemory(int64(totalEphReqOrUsed))
+		summary.AverageEphemeralPercent = avgEphPercent
+		// summary.EphemeralStoragePercentiles = GetResourcePercentilesData(results, "EphemeralStorage", summaryContext, showEphemeralStorage) // Add this if JSONSummary has EphemeralStoragePercentiles
+	}
+
+	if cmdType == utils.CmdTypeAllocation && showHostPorts {
 		summary.TopHostPorts = GetTopHostPortsData(results)
 	}
 	return summary, nil
 }
 
 // PrintNodeResourceSummary prints the summary section for resource allocation or utilization.
-// It includes total nodes and percentiles for CPU and Memory.
+// It includes total nodes and percentiles for CPU, Memory, and optionally Ephemeral Storage.
 // If cmdType is "allocation" and showHostPorts is true, it also prints top host port usage.
 // It writes the output to the provided io.Writer (e.g., os.Stdout).
-func PrintNodeResourceSummary(results []utils.NodeResult, showHostPorts bool, out io.Writer, cmdType string) {
+func PrintNodeResourceSummary(results []utils.NodeResult, showHostPorts bool, showEphemeralStorage bool, out io.Writer, cmdType utils.CmdType) {
 	if len(results) == 0 {
 		return // No data to summarize
 	}
 
 	var summaryTitle string
 	var summaryContext string
-	if cmdType == output.CmdTypeAllocation {
+	if cmdType == utils.CmdTypeAllocation {
 		summaryTitle = "--- Node Resource Allocation Summary ---"
 		summaryContext = "Allocation"
-	} else if cmdType == output.CmdTypeUtilization {
+	} else if cmdType == utils.CmdTypeUtilization {
 		summaryTitle = "--- Node Resource Utilization Summary ---"
 		summaryContext = "Utilization"
 	} else {
@@ -192,19 +251,25 @@ func PrintNodeResourceSummary(results []utils.NodeResult, showHostPorts bool, ou
 	fmt.Fprintln(out, "\n"+summaryTitle)
 	fmt.Fprintf(out, "Total Nodes: %d\n", len(results))
 
+	// TODO: Update printResourcePercentiles and printResourceDistributionHistogram signatures
 	printResourcePercentiles(results, summaryContext, "CPU", out)
-	printResourceDistributionHistogram(results, summaryContext, "CPU", out) // New histogram
+	printResourceDistributionHistogram(results, summaryContext, "CPU", out)
 	printResourcePercentiles(results, summaryContext, "Memory", out)
-	printResourceDistributionHistogram(results, summaryContext, "Memory", out) // New histogram
+	printResourceDistributionHistogram(results, summaryContext, "Memory", out)
 
-	if cmdType == output.CmdTypeAllocation && showHostPorts {
+	if showEphemeralStorage {
+		printResourcePercentiles(results, summaryContext, "EphemeralStorage", out)
+		printResourceDistributionHistogram(results, summaryContext, "EphemeralStorage", out)
+	}
+
+	if cmdType == utils.CmdTypeAllocation && showHostPorts {
 		printTopHostPorts(results, out)
 	}
 }
 
-// printResourcePercentiles calculates and prints percentiles for a given resource (CPU or Memory)
+// printResourcePercentiles calculates and prints percentiles for a given resource (CPU, Memory, or EphemeralStorage)
 // based on the summary context (Allocation or Utilization).
-func printResourcePercentiles(results []utils.NodeResult, summaryContext string, resourceName string, out io.Writer) {
+func printResourcePercentiles(results []utils.NodeResult, summaryContext string, resourceName string, out io.Writer) { // Removed showEphemeralStorage, it's implicit if resourceName is EphemeralStorage
 	// Create a copy to sort independently
 	sortedResults := make([]utils.NodeResult, len(results))
 	copy(sortedResults, results)
@@ -216,16 +281,26 @@ func printResourcePercentiles(results []utils.NodeResult, summaryContext string,
 		contextVerb = "used"
 	}
 
-	if resourceName == "CPU" {
+	switch resourceName {
+	case "CPU":
 		sort.Slice(sortedResults, func(i, j int) bool {
 			return sortedResults[i].CPUPercent < sortedResults[j].CPUPercent
 		})
 		fmt.Fprintf(out, "\nCPU %s Percentiles (based on %% of allocatable CPU %s):\n", summaryContext, contextVerb)
-	} else { // Memory
+	case "Memory":
 		sort.Slice(sortedResults, func(i, j int) bool {
 			return sortedResults[i].MemPercent < sortedResults[j].MemPercent
 		})
 		fmt.Fprintf(out, "\nMemory %s Percentiles (based on %% of allocatable Memory %s):\n", summaryContext, contextVerb)
+	case "EphemeralStorage":
+		sort.Slice(sortedResults, func(i, j int) bool {
+			return sortedResults[i].EphemeralStoragePercent < sortedResults[j].EphemeralStoragePercent
+		})
+		fmt.Fprintf(out, "\nEphemeral Storage %s Percentiles (based on %% of allocatable Ephemeral Storage %s):\n", summaryContext, contextVerb)
+	default:
+		// This case should ideally not be reached if called correctly
+		fmt.Fprintf(out, "\nUnknown resource for percentiles: %s\n", resourceName)
+		return
 	}
 
 	// Use the centrally defined percentiles
@@ -257,14 +332,20 @@ func printResourcePercentiles(results []utils.NodeResult, summaryContext string,
 		var valueString string
 		var percentValue float64
 
-		if resourceName == "CPU" {
-			// ReqCPU stores actual usage in utilization context, and requested in allocation context
+		switch resourceName {
+		case "CPU":
 			valueString = utils.FormatCPU(nodeRes.ReqCPU)
 			percentValue = nodeRes.CPUPercent
-		} else { // Memory
-			// ReqMem stores actual usage in utilization context, and requested in allocation context
+		case "Memory":
 			valueString = utils.FormatMemory(nodeRes.ReqMem.Value())
 			percentValue = nodeRes.MemPercent
+		case "EphemeralStorage":
+			valueString = utils.FormatMemory(nodeRes.ReqEphemeralStorage.Value()) // Assuming FormatMemory is suitable
+			percentValue = nodeRes.EphemeralStoragePercent
+		default:
+			// Should not happen if resourceName validation is done prior or switch is exhaustive
+			valueString = "N/A"
+			percentValue = 0
 		}
 		// Use DisplayName for text output, ensure sufficient padding for potentially longer names
 		// Removed the per-percentile bar chart from here
@@ -275,7 +356,7 @@ func printResourcePercentiles(results []utils.NodeResult, summaryContext string,
 }
 
 // printResourceDistributionHistogram prints a histogram of node distribution across utilization/allocation buckets.
-func printResourceDistributionHistogram(results []utils.NodeResult, summaryContext string, resourceName string, out io.Writer) {
+func printResourceDistributionHistogram(results []utils.NodeResult, summaryContext string, resourceName string, out io.Writer) { // Removed showEphemeralStorage for consistency
 	if len(results) == 0 {
 		return
 	}
@@ -296,10 +377,16 @@ func printResourceDistributionHistogram(results []utils.NodeResult, summaryConte
 
 	for _, res := range results {
 		var percentValue float64
-		if resourceName == "CPU" {
+		switch resourceName {
+		case "CPU":
 			percentValue = res.CPUPercent
-		} else { // Memory
+		case "Memory":
 			percentValue = res.MemPercent
+		case "EphemeralStorage":
+			percentValue = res.EphemeralStoragePercent
+		default:
+			// Should not happen if called correctly
+			continue
 		}
 
 		bucketIndex := int(math.Floor(percentValue / bucketSize))

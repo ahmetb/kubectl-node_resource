@@ -24,15 +24,10 @@ import (
 	"k8s.io/klog/v2"
 )
 
-const (
-	CmdTypeAllocation  = "allocation"
-	CmdTypeUtilization = "utilization"
-)
-
 // ToJSONNode converts a utils.NodeResult to a JSONNode.
 // cmdType helps determine whether to populate Requested or Used fields.
-// showFree and showHostPorts flags control optional fields.
-func ToJSONNode(nodeRes utils.NodeResult, cmdType string, showFree bool, showHostPorts bool) JSONNode {
+// showFree, showHostPorts, showEphemeralStorage flags control optional fields.
+func ToJSONNode(nodeRes utils.NodeResult, cmdType utils.CmdType, showFree bool, showHostPorts bool, showEphemeralStorage bool) JSONNode {
 	jsonNode := JSONNode{
 		Name:              nodeRes.Node.Name,
 		CPUAllocatable:    utils.FormatCPU(*nodeRes.Node.Status.Allocatable.Cpu()),
@@ -41,27 +36,38 @@ func ToJSONNode(nodeRes utils.NodeResult, cmdType string, showFree bool, showHos
 		MemoryPercent:     nodeRes.MemPercent,
 	}
 
-	if cmdType == CmdTypeAllocation {
+	if cmdType == utils.CmdTypeAllocation {
 		jsonNode.CPURequested = utils.FormatCPU(nodeRes.ReqCPU)
 		jsonNode.MemoryRequested = utils.FormatMemory(nodeRes.ReqMem.Value())
 		if showHostPorts {
-			// Ensure HostPorts is not nil to avoid "null" in JSON if empty
 			if nodeRes.HostPorts == nil {
 				jsonNode.HostPorts = []int32{}
 			} else {
 				jsonNode.HostPorts = nodeRes.HostPorts
 			}
 		}
-	} else if cmdType == CmdTypeUtilization {
+		if showEphemeralStorage {
+			jsonNode.EphemeralStorageAllocatable = utils.FormatMemory(nodeRes.AllocEphemeralStorage.Value())
+			jsonNode.EphemeralStorageRequested = utils.FormatMemory(nodeRes.ReqEphemeralStorage.Value())
+			jsonNode.EphemeralStoragePercent = nodeRes.EphemeralStoragePercent
+		}
+	} else if cmdType == utils.CmdTypeUtilization {
 		jsonNode.CPUUsed = utils.FormatCPU(nodeRes.ReqCPU)               // ReqCPU stores actual usage in utilization context
 		jsonNode.MemoryUsed = utils.FormatMemory(nodeRes.ReqMem.Value()) // ReqMem stores actual usage
+		if showEphemeralStorage {
+			jsonNode.EphemeralStorageAllocatable = utils.FormatMemory(nodeRes.AllocEphemeralStorage.Value())
+			jsonNode.EphemeralStorageUsed = utils.FormatMemory(nodeRes.ReqEphemeralStorage.Value()) // ReqEphemeralStorage stores actual usage in util context
+			jsonNode.EphemeralStoragePercent = nodeRes.EphemeralStoragePercent
+		}
 	}
 
 	if showFree {
 		jsonNode.FreeCPU = utils.FormatCPU(nodeRes.FreeCPU)
 		jsonNode.FreeMemory = utils.FormatMemory(nodeRes.FreeMem.Value())
+		if showEphemeralStorage {
+			jsonNode.FreeEphemeralStorage = utils.FormatMemory(nodeRes.FreeEphemeralStorage.Value())
+		}
 	}
-
 	return jsonNode
 }
 
@@ -81,11 +87,12 @@ func PrintJSON(data JSONOutput, streams genericclioptions.IOStreams) error {
 // It takes the list of results, command type, and various display options.
 func GetJSONOutput(
 	results []utils.NodeResult,
-	cmdType string,
+	cmdType utils.CmdType, // Changed to utils.CmdType
 	showFree bool,
 	showHostPorts bool, // Only relevant for "allocations" command
+	showEphemeralStorage bool, // Added this flag
 	summaryOpt string, // To decide if summary is needed
-	getSummaryFunc func([]utils.NodeResult, bool, string) (*JSONSummary, error), // Function to get summary data
+	getSummaryFunc func([]utils.NodeResult, bool, bool, utils.CmdType) (*JSONSummary, error), // Function to get summary data, added showEphemeralStorage & changed cmdType
 ) (JSONOutput, error) {
 	output := JSONOutput{}
 
@@ -93,7 +100,7 @@ func GetJSONOutput(
 	if summaryOpt != utils.SummaryOnly {
 		jsonNodes := make([]JSONNode, len(results))
 		for i, res := range results {
-			jsonNodes[i] = ToJSONNode(res, cmdType, showFree, showHostPorts && cmdType == CmdTypeAllocation)
+			jsonNodes[i] = ToJSONNode(res, cmdType, showFree, showHostPorts && cmdType == utils.CmdTypeAllocation, showEphemeralStorage)
 		}
 		output.Nodes = jsonNodes
 	}
@@ -101,8 +108,7 @@ func GetJSONOutput(
 	// Populate summary if not hidden
 	if summaryOpt != utils.SummaryHide {
 		if getSummaryFunc != nil {
-			// Pass cmdType to the summary function
-			summaryData, err := getSummaryFunc(results, showHostPorts && cmdType == CmdTypeAllocation, cmdType)
+			summaryData, err := getSummaryFunc(results, showHostPorts && cmdType == utils.CmdTypeAllocation, showEphemeralStorage, cmdType)
 			if err != nil {
 				return JSONOutput{}, fmt.Errorf("failed to get summary data for JSON output: %w", err)
 			}

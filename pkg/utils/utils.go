@@ -36,6 +36,8 @@ const (
 	SortByCPUPercent = "cpu-percent"
 	// SortByMemoryPercent sorts nodes by memory percentage.
 	SortByMemoryPercent = "memory-percent"
+	// SortByEphemeralStoragePercent sorts nodes by ephemeral storage percentage.
+	SortByEphemeralStoragePercent = "eph-percent"
 	// SortByNodeName sorts nodes by name.
 	SortByNodeName = "name"
 
@@ -101,7 +103,7 @@ func CalculatePercent(used, total float64) float64 {
 }
 
 // SortResults sorts a slice of NodeResult based on the sortBy criteria.
-// It supports sorting by CPU percentage, memory percentage, or node name.
+// It supports sorting by CPU percentage, memory percentage, ephemeral storage percentage, or node name.
 // Secondary sort criteria are applied for tie-breaking.
 func SortResults(results []NodeResult, sortBy string) {
 	sort.Slice(results, func(i, j int) bool {
@@ -110,16 +112,36 @@ func SortResults(results []NodeResult, sortBy string) {
 			if results[i].CPUPercent != results[j].CPUPercent {
 				return results[i].CPUPercent > results[j].CPUPercent
 			}
+			// Tie-breaking
 			if results[i].MemPercent != results[j].MemPercent {
 				return results[i].MemPercent > results[j].MemPercent
+			}
+			if results[i].EphemeralStoragePercent != results[j].EphemeralStoragePercent {
+				return results[i].EphemeralStoragePercent > results[j].EphemeralStoragePercent
 			}
 			return results[i].Node.Name < results[j].Node.Name
 		case SortByMemoryPercent:
 			if results[i].MemPercent != results[j].MemPercent {
 				return results[i].MemPercent > results[j].MemPercent
 			}
+			// Tie-breaking
 			if results[i].CPUPercent != results[j].CPUPercent {
 				return results[i].CPUPercent > results[j].CPUPercent
+			}
+			if results[i].EphemeralStoragePercent != results[j].EphemeralStoragePercent {
+				return results[i].EphemeralStoragePercent > results[j].EphemeralStoragePercent
+			}
+			return results[i].Node.Name < results[j].Node.Name
+		case SortByEphemeralStoragePercent:
+			if results[i].EphemeralStoragePercent != results[j].EphemeralStoragePercent {
+				return results[i].EphemeralStoragePercent > results[j].EphemeralStoragePercent
+			}
+			// Tie-breaking
+			if results[i].CPUPercent != results[j].CPUPercent {
+				return results[i].CPUPercent > results[j].CPUPercent
+			}
+			if results[i].MemPercent != results[j].MemPercent {
+				return results[i].MemPercent > results[j].MemPercent
 			}
 			return results[i].Node.Name < results[j].Node.Name
 		default: // SortByNodeName

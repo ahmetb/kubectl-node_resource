@@ -42,11 +42,12 @@ import (
 func newAllocationCmd(streams genericclioptions.IOStreams) *cobra.Command {
 	opts := genericclioptions.NewConfigFlags(true)
 	var (
-		sortBy        string
-		showHostPorts bool
-		showFree      bool
-		summaryOpt    string
-		jsonOutput    bool
+		sortBy               string
+		showHostPorts        bool
+		showFree             bool
+		showEphemeralStorage bool
+		summaryOpt           string
+		jsonOutput           bool
 	)
 
 	cmd := &cobra.Command{
@@ -71,8 +72,8 @@ Nodes can be filtered by a label selector.`,
   kubectl node-resource allocation "kubernetes.io/hostname=node1"`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if sortBy != utils.SortByCPUPercent && sortBy != utils.SortByMemoryPercent && sortBy != utils.SortByNodeName {
-				return fmt.Errorf("invalid --sort-by value. Must be one of: %s, %s, %s", utils.SortByCPUPercent, utils.SortByMemoryPercent, utils.SortByNodeName)
+			if sortBy != utils.SortByCPUPercent && sortBy != utils.SortByMemoryPercent && sortBy != utils.SortByNodeName && sortBy != utils.SortByEphemeralStoragePercent {
+				return fmt.Errorf("invalid --sort-by value. Must be one of: %s, %s, %s, or %s", utils.SortByCPUPercent, utils.SortByMemoryPercent, utils.SortByNodeName, utils.SortByEphemeralStoragePercent)
 			}
 			if summaryOpt != utils.SummaryShow && summaryOpt != utils.SummaryOnly && summaryOpt != utils.SummaryHide {
 				return fmt.Errorf("invalid --summary value. Must be one of: %s, %s, %s", utils.SummaryShow, utils.SummaryOnly, utils.SummaryHide)
@@ -84,21 +85,23 @@ Nodes can be filtered by a label selector.`,
 			klog.V(4).InfoS("Starting allocation command", "selector", selector, "sortBy", sortBy, "showHostPorts", showHostPorts, "showFree", showFree, "summary", summaryOpt, "json", jsonOutput)
 
 			runOpts := allocationRunOptions{
-				configFlags:   opts,
-				streams:       streams,
-				nodeSelector:  selector,
-				sortBy:        sortBy,
-				showHostPorts: showHostPorts,
-				showFree:      showFree,
-				summaryOpt:    summaryOpt,
-				jsonOutput:    jsonOutput,
+				configFlags:          opts,
+				streams:              streams,
+				nodeSelector:         selector,
+				sortBy:               sortBy,
+				showHostPorts:        showHostPorts,
+				showFree:             showFree,
+				summaryOpt:           summaryOpt,
+				jsonOutput:           jsonOutput,
+				showEphemeralStorage: showEphemeralStorage,
 			}
 			return runAllocation(cmd.Context(), runOpts)
 		},
 	}
 
-	cmd.Flags().StringVar(&sortBy, "sort-by", utils.SortByCPUPercent, fmt.Sprintf("Sort nodes by: %s, %s, or %s", utils.SortByCPUPercent, utils.SortByMemoryPercent, utils.SortByNodeName))
+	cmd.Flags().StringVar(&sortBy, "sort-by", utils.SortByCPUPercent, fmt.Sprintf("Sort nodes by: %s, %s, %s, or %s", utils.SortByCPUPercent, utils.SortByMemoryPercent, utils.SortByNodeName, utils.SortByEphemeralStoragePercent))
 	cmd.Flags().BoolVar(&showHostPorts, "show-host-ports", false, "Show host ports used by containers on each node")
+	cmd.Flags().BoolVar(&showEphemeralStorage, "show-ephemeral-storage", false, "Show ephemeral storage allocation/utilization")
 	cmd.Flags().BoolVar(&showFree, "show-free", false, "Show free CPU and Memory on each node")
 	cmd.Flags().StringVar(&summaryOpt, "summary", utils.SummaryShow, fmt.Sprintf("Summary display option: %s, %s, or %s", utils.SummaryShow, utils.SummaryOnly, utils.SummaryHide))
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
@@ -107,14 +110,15 @@ Nodes can be filtered by a label selector.`,
 }
 
 type allocationRunOptions struct {
-	configFlags   *genericclioptions.ConfigFlags
-	streams       genericclioptions.IOStreams
-	nodeSelector  string
-	sortBy        string
-	showHostPorts bool
-	showFree      bool
-	summaryOpt    string
-	jsonOutput    bool
+	configFlags          *genericclioptions.ConfigFlags
+	streams              genericclioptions.IOStreams
+	nodeSelector         string
+	sortBy               string
+	showHostPorts        bool
+	showFree             bool
+	summaryOpt           string
+	jsonOutput           bool
+	showEphemeralStorage bool
 }
 
 // runAllocation executes the core logic for the allocation command.
@@ -167,16 +171,17 @@ func runAllocation(ctx context.Context, opts allocationRunOptions) error {
 			}
 			klog.V(5).InfoS("Pods listed for node", "nodeName", node.Name, "podCount", len(podList.Items))
 
-			var totalCPU, totalMem resource.Quantity
+			var totalCPU, totalMem, totalEphemeralStorage resource.Quantity
 			hostPortsMap := make(map[int32]struct{})
 
 			for _, pod := range podList.Items {
 				if gCtx.Err() != nil { // Check for context cancellation from errgroup
 					return gCtx.Err()
 				}
-				podCPU, podMem := aggregatePodRequests(&pod)
+				podCPU, podMem, podEphemeralStorage := aggregatePodRequests(&pod)
 				totalCPU.Add(podCPU)
 				totalMem.Add(podMem)
+				totalEphemeralStorage.Add(podEphemeralStorage)
 				if opts.showHostPorts {
 					for _, container := range pod.Spec.Containers {
 						for _, port := range container.Ports {
@@ -197,8 +202,10 @@ func runAllocation(ctx context.Context, opts allocationRunOptions) error {
 
 			allocCPU := node.Status.Allocatable.Cpu()
 			allocMem := node.Status.Allocatable.Memory()
+			allocEphemeralStorage := node.Status.Allocatable[corev1.ResourceEphemeralStorage]
 			cpuPercent := utils.CalculatePercent(totalCPU.AsApproximateFloat64(), allocCPU.AsApproximateFloat64())
 			memPercent := utils.CalculatePercent(float64(totalMem.Value()), float64(allocMem.Value()))
+			ephemeralStoragePercent := utils.CalculatePercent(float64(totalEphemeralStorage.Value()), float64(allocEphemeralStorage.Value()))
 
 			freeCPU := allocCPU.DeepCopy()
 			freeCPU.Sub(totalCPU)
@@ -210,6 +217,12 @@ func runAllocation(ctx context.Context, opts allocationRunOptions) error {
 			freeMem.Sub(totalMem)
 			if freeMem.Sign() < 0 { // Ensure free is not negative
 				freeMem = *resource.NewQuantity(0, resource.BinarySI)
+			}
+
+			freeEphemeralStorage := allocEphemeralStorage.DeepCopy()
+			freeEphemeralStorage.Sub(totalEphemeralStorage)
+			if freeEphemeralStorage.Sign() < 0 { // Ensure free is not negative
+				freeEphemeralStorage = *resource.NewQuantity(0, resource.BinarySI)
 			}
 
 			var currentHostPorts []int32
@@ -229,8 +242,13 @@ func runAllocation(ctx context.Context, opts allocationRunOptions) error {
 				HostPorts:  currentHostPorts,
 				FreeCPU:    freeCPU,
 				FreeMem:    freeMem,
+				// Ephemeral Storage
+				AllocEphemeralStorage:   allocEphemeralStorage,
+				ReqEphemeralStorage:     totalEphemeralStorage,
+				EphemeralStoragePercent: ephemeralStoragePercent,
+				FreeEphemeralStorage:    freeEphemeralStorage,
 			}
-			klog.V(5).InfoS("Finished processing node", "nodeName", node.Name, "reqCPU", totalCPU.String(), "reqMem", totalMem.String(), "freeCPU", freeCPU.String(), "freeMem", freeMem.String())
+			klog.V(5).InfoS("Finished processing node", "nodeName", node.Name, "reqCPU", totalCPU.String(), "reqMem", totalMem.String(), "reqEphemeralStorage", totalEphemeralStorage.String(), "freeCPU", freeCPU.String(), "freeMem", freeMem.String(), "freeEphemeralStorage", freeEphemeralStorage.String())
 
 			if progressHelper != nil {
 				// Pass the same prefix, or an updated one if needed for this stage
@@ -259,10 +277,10 @@ func runAllocation(ctx context.Context, opts allocationRunOptions) error {
 
 	if opts.jsonOutput {
 		// JSON Output Path
-		jsonData, err := output.GetJSONOutput(results, output.CmdTypeAllocation, opts.showFree, opts.showHostPorts, opts.summaryOpt,
-			func(r []utils.NodeResult, shp bool, cType string) (*output.JSONSummary, error) {
-				// cType here will be output.CmdTypeAllocation, passed by GetJSONOutput
-				return summary.GetNodeResourceSummaryData(r, shp, cType)
+		jsonData, err := output.GetJSONOutput(results, utils.CmdTypeAllocation, opts.showFree, opts.showHostPorts, opts.showEphemeralStorage, opts.summaryOpt,
+			func(r []utils.NodeResult, shp bool, ses bool, cType utils.CmdType) (*output.JSONSummary, error) { // Changed cType to utils.CmdType
+				// cType here will be utils.CmdTypeAllocation, passed by GetJSONOutput
+				return summary.GetNodeResourceSummaryData(r, shp, ses, cType)
 			})
 		if err != nil {
 			return fmt.Errorf("failed to prepare JSON data for allocation: %w", err)
@@ -276,8 +294,14 @@ func runAllocation(ctx context.Context, opts allocationRunOptions) error {
 	// Table Output Path
 	table := tablewriter.NewWriter(opts.streams.Out)
 	headerSlice := []string{"NODE", "CPU", "CPU REQ", "CPU%", "MEMORY", "MEM REQ", "MEM%"}
+	if opts.showEphemeralStorage {
+		headerSlice = append(headerSlice, "EPHEMERAL", "EPH REQ", "EPH%")
+	}
 	if opts.showFree {
 		headerSlice = append(headerSlice, "FREE CPU", "FREE MEMORY")
+		if opts.showEphemeralStorage {
+			headerSlice = append(headerSlice, "FREE EPH")
+		}
 	}
 	if opts.showHostPorts {
 		headerSlice = append(headerSlice, "HOST PORTS")
@@ -288,9 +312,11 @@ func runAllocation(ctx context.Context, opts allocationRunOptions) error {
 	for _, res := range results {
 		allocCPU := res.Node.Status.Allocatable.Cpu()
 		allocMem := res.Node.Status.Allocatable.Memory()
+		// allocEphemeralStorage is already in res.AllocEphemeralStorage
 
 		cpuColor := ui.PercentFontColor(res.CPUPercent)
 		memColor := ui.PercentFontColor(res.MemPercent)
+		ephColor := ui.PercentFontColor(res.EphemeralStoragePercent)
 
 		rowValues := []string{
 			res.Node.Name,
@@ -302,6 +328,15 @@ func runAllocation(ctx context.Context, opts allocationRunOptions) error {
 			fmt.Sprintf("%s%.1f%%%s", memColor, res.MemPercent, ui.ColorReset),
 		}
 
+		if opts.showEphemeralStorage {
+			// Assuming utils.FormatMemory can be used for ephemeral storage as it's also bytes
+			rowValues = append(rowValues,
+				utils.FormatMemory(res.AllocEphemeralStorage.Value()),
+				utils.FormatMemory(res.ReqEphemeralStorage.Value()),
+				fmt.Sprintf("%s%.1f%%%s", ephColor, res.EphemeralStoragePercent, ui.ColorReset),
+			)
+		}
+
 		if opts.showFree {
 			freeCPUColor := ui.PercentBackgroundColor(res.CPUPercent)
 			freeMemColor := ui.PercentBackgroundColor(res.MemPercent)
@@ -309,6 +344,13 @@ func runAllocation(ctx context.Context, opts allocationRunOptions) error {
 				fmt.Sprintf("%s%s%s", freeCPUColor, utils.FormatCPU(res.FreeCPU), ui.ColorReset),
 				fmt.Sprintf("%s%s%s", freeMemColor, utils.FormatMemory(res.FreeMem.Value()), ui.ColorReset),
 			)
+			if opts.showEphemeralStorage {
+				freeEphColor := ui.PercentBackgroundColor(res.EphemeralStoragePercent)
+				// Assuming utils.FormatMemory can be used for ephemeral storage
+				rowValues = append(rowValues,
+					fmt.Sprintf("%s%s%s", freeEphColor, utils.FormatMemory(res.FreeEphemeralStorage.Value()), ui.ColorReset),
+				)
+			}
 		}
 
 		if opts.showHostPorts {
@@ -330,18 +372,19 @@ func runAllocation(ctx context.Context, opts allocationRunOptions) error {
 	}
 
 	if opts.summaryOpt == utils.SummaryShow || opts.summaryOpt == utils.SummaryOnly {
-		summary.PrintNodeResourceSummary(results, opts.showHostPorts, opts.streams.Out, "allocation")
+		summary.PrintNodeResourceSummary(results, opts.showHostPorts, opts.showEphemeralStorage, opts.streams.Out, utils.CmdTypeAllocation) // Changed to utils.CmdTypeAllocation
 	}
 
 	klog.V(4).InfoS("Allocation command finished successfully")
 	return nil
 }
 
-// aggregatePodRequests calculates the total CPU and memory requests for a single pod,
+// aggregatePodRequests calculates the total CPU, memory, and ephemeral storage requests for a single pod,
 // considering init containers as per Kubernetes resource accounting.
-func aggregatePodRequests(pod *corev1.Pod) (resource.Quantity, resource.Quantity) {
+func aggregatePodRequests(pod *corev1.Pod) (resource.Quantity, resource.Quantity, resource.Quantity) {
 	sumCPU := *resource.NewQuantity(0, resource.DecimalSI)
 	sumMem := *resource.NewQuantity(0, resource.BinarySI)
+	sumEphemeralStorage := *resource.NewQuantity(0, resource.BinarySI)
 
 	// Regular containers
 	for _, container := range pod.Spec.Containers {
@@ -350,6 +393,9 @@ func aggregatePodRequests(pod *corev1.Pod) (resource.Quantity, resource.Quantity
 		}
 		if req, ok := container.Resources.Requests[corev1.ResourceMemory]; ok {
 			sumMem.Add(req)
+		}
+		if req, ok := container.Resources.Requests[corev1.ResourceEphemeralStorage]; ok {
+			sumEphemeralStorage.Add(req)
 		}
 	}
 
@@ -363,6 +409,7 @@ func aggregatePodRequests(pod *corev1.Pod) (resource.Quantity, resource.Quantity
 
 	maxInitCPU := *resource.NewQuantity(0, resource.DecimalSI)
 	maxInitMem := *resource.NewQuantity(0, resource.BinarySI)
+	maxInitEphemeralStorage := *resource.NewQuantity(0, resource.BinarySI)
 
 	for _, container := range pod.Spec.InitContainers {
 		if req, ok := container.Resources.Requests[corev1.ResourceCPU]; ok {
@@ -373,6 +420,11 @@ func aggregatePodRequests(pod *corev1.Pod) (resource.Quantity, resource.Quantity
 		if req, ok := container.Resources.Requests[corev1.ResourceMemory]; ok {
 			if req.Cmp(maxInitMem) > 0 {
 				maxInitMem = req.DeepCopy()
+			}
+		}
+		if req, ok := container.Resources.Requests[corev1.ResourceEphemeralStorage]; ok {
+			if req.Cmp(maxInitEphemeralStorage) > 0 {
+				maxInitEphemeralStorage = req.DeepCopy()
 			}
 		}
 	}
@@ -386,8 +438,11 @@ func aggregatePodRequests(pod *corev1.Pod) (resource.Quantity, resource.Quantity
 	if maxInitMem.Cmp(sumMem) > 0 {
 		sumMem = maxInitMem.DeepCopy()
 	}
+	if maxInitEphemeralStorage.Cmp(sumEphemeralStorage) > 0 {
+		sumEphemeralStorage = maxInitEphemeralStorage.DeepCopy()
+	}
 
-	return sumCPU, sumMem
+	return sumCPU, sumMem, sumEphemeralStorage
 }
 
 func setKubectlTableStyle(table *tablewriter.Table) {

@@ -32,4 +32,19 @@ type NodeResult struct {
 	HostPorts  []int32
 	FreeCPU    resource.Quantity // Added for --show-free
 	FreeMem    resource.Quantity // Added for --show-free
+
+	// Ephemeral Storage fields
+	AllocEphemeralStorage   resource.Quantity
+	ReqEphemeralStorage     resource.Quantity
+	EphemeralStoragePercent float64
+	FreeEphemeralStorage    resource.Quantity
 }
+
+// CmdType indicates the command type for shared functions
+// Assuming these are not duplicates, will verify after reading utils.go
+type CmdType string
+
+const (
+	CmdTypeAllocation  CmdType = "allocation"
+	CmdTypeUtilization CmdType = "utilization"
+)

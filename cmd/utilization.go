@@ -63,7 +63,7 @@ Kubernetes metrics-server to be installed and running in the cluster.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if sortBy != utils.SortByCPUPercent && sortBy != utils.SortByMemoryPercent && sortBy != utils.SortByNodeName {
-				return fmt.Errorf("invalid --sort-by value. Must be one of: %s, %s, %s", utils.SortByCPUPercent, utils.SortByMemoryPercent, utils.SortByNodeName)
+				return fmt.Errorf("invalid --sort-by value. Must be one of: %s, %s, or %s", utils.SortByCPUPercent, utils.SortByMemoryPercent, utils.SortByNodeName)
 			}
 			if summaryOpt != utils.SummaryShow && summaryOpt != utils.SummaryOnly && summaryOpt != utils.SummaryHide {
 				return fmt.Errorf("invalid --summary value. Must be one of: %s, %s, %s", utils.SummaryShow, utils.SummaryOnly, utils.SummaryHide)
@@ -87,7 +87,7 @@ Kubernetes metrics-server to be installed and running in the cluster.`,
 		},
 	}
 
-	cmd.Flags().StringVar(&sortBy, "sort-by", utils.SortByCPUPercent, fmt.Sprintf("Sort nodes by: %s, %s, or %s", utils.SortByCPUPercent, utils.SortByMemoryPercent, utils.SortByNodeName))
+	cmd.Flags().StringVar(&sortBy, "sort-by", utils.SortByCPUPercent, fmt.Sprintf("Sort nodes by: %s, %s, or %s", utils.SortByCPUPercent, utils.SortByMemoryPercent, utils.SortByNodeName)) // Reverted: Removed EphemeralStorage sort option from help
 	cmd.Flags().BoolVar(&showFree, "show-free", false, "Show free CPU and Memory on each node")
 	cmd.Flags().StringVar(&summaryOpt, "summary", utils.SummaryShow, fmt.Sprintf("Summary display option: %s, %s, or %s", utils.SummaryShow, utils.SummaryOnly, utils.SummaryHide))
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
@@ -159,11 +159,13 @@ func runUtilization(ctx context.Context, opts utilizationRunOptions) error {
 			actCPU = nm.Usage[corev1.ResourceCPU]
 			actMem = nm.Usage[corev1.ResourceMemory]
 		} else {
-			klog.V(2).InfoS("Metrics not found for node, assuming zero usage", "nodeName", node.Name)
-			// Ensure these are non-nil quantities
+			klog.V(2).InfoS("Metrics not found for node, assuming zero usage for all resources", "nodeName", node.Name)
 			actCPU = *resource.NewQuantity(0, resource.DecimalSI)
 			actMem = *resource.NewQuantity(0, resource.BinarySI)
 		}
+
+		cpuPercent := utils.CalculatePercent(actCPU.AsApproximateFloat64(), allocCPU.AsApproximateFloat64())
+		memPercent := utils.CalculatePercent(float64(actMem.Value()), float64(allocMem.Value()))
 
 		freeCPU := allocCPU.DeepCopy()
 		freeCPU.Sub(actCPU)
@@ -179,13 +181,12 @@ func runUtilization(ctx context.Context, opts utilizationRunOptions) error {
 
 		results[i] = utils.NodeResult{
 			Node:       node,
-			ReqCPU:     actCPU, // For utilization, ReqCPU/Mem store actual used resources
+			ReqCPU:     actCPU,
 			ReqMem:     actMem,
-			CPUPercent: utils.CalculatePercent(actCPU.AsApproximateFloat64(), allocCPU.AsApproximateFloat64()),
-			MemPercent: utils.CalculatePercent(float64(actMem.Value()), float64(allocMem.Value())),
+			CPUPercent: cpuPercent,
+			MemPercent: memPercent,
 			FreeCPU:    freeCPU,
 			FreeMem:    freeMem,
-			// HostPorts are not relevant for utilization command
 		}
 	}
 
@@ -194,10 +195,9 @@ func runUtilization(ctx context.Context, opts utilizationRunOptions) error {
 
 	if opts.jsonOutput {
 		// JSON Output Path
-		jsonData, err := output.GetJSONOutput(results, output.CmdTypeUtilization, opts.showFree, false /*showHostPorts*/, opts.summaryOpt,
-			func(r []utils.NodeResult, shp bool, cType string) (*output.JSONSummary, error) {
-				// cType here will be output.CmdTypeUtilization, passed by GetJSONOutput
-				return summary.GetNodeResourceSummaryData(r, shp, cType)
+		jsonData, err := output.GetJSONOutput(results, utils.CmdTypeUtilization, opts.showFree, false /*showHostPorts*/, false /*showEphemeralStorage*/, opts.summaryOpt,
+			func(r []utils.NodeResult, shp bool, ses bool, cType utils.CmdType) (*output.JSONSummary, error) {
+				return summary.GetNodeResourceSummaryData(r, shp, ses, cType)
 			})
 		if err != nil {
 			return fmt.Errorf("failed to prepare JSON data for utilization: %w", err)
@@ -235,8 +235,8 @@ func runUtilization(ctx context.Context, opts utilizationRunOptions) error {
 		}
 
 		if opts.showFree {
-			freeCPUColor := ui.PercentBackgroundColor(res.CPUPercent) // Color based on utilization %
-			freeMemColor := ui.PercentBackgroundColor(res.MemPercent) // Color based on utilization %
+			freeCPUColor := ui.PercentBackgroundColor(res.CPUPercent)
+			freeMemColor := ui.PercentBackgroundColor(res.MemPercent)
 			rowValues = append(rowValues,
 				fmt.Sprintf("%s%s%s", freeCPUColor, utils.FormatCPU(res.FreeCPU), ui.ColorReset),
 				fmt.Sprintf("%s%s%s", freeMemColor, utils.FormatMemory(res.FreeMem.Value()), ui.ColorReset),
@@ -250,7 +250,8 @@ func runUtilization(ctx context.Context, opts utilizationRunOptions) error {
 	}
 
 	if opts.summaryOpt == utils.SummaryShow || opts.summaryOpt == utils.SummaryOnly {
-		summary.PrintNodeResourceSummary(results, false /*showHostPorts*/, opts.streams.Out, output.CmdTypeUtilization)
+		// Pass false for showEphemeralStorage for utilization command
+		summary.PrintNodeResourceSummary(results, false /*showHostPorts*/, false /*showEphemeralStorage*/, opts.streams.Out, utils.CmdTypeUtilization)
 	}
 
 	klog.V(4).InfoS("Utilization command finished successfully")

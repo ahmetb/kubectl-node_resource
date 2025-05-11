@@ -23,18 +23,23 @@ package output
 // JSONNode represents a single node's data in JSON format.
 // Fields are tagged with `omitempty` if they are not always present.
 type JSONNode struct {
-	Name              string  `json:"name"`
-	CPUAllocatable    string  `json:"cpuAllocatable"`
-	CPURequested      string  `json:"cpuRequested,omitempty"` // For allocation
-	CPUUsed           string  `json:"cpuUsed,omitempty"`      // For utilization
-	CPUPercent        float64 `json:"cpuPercent"`
-	MemoryAllocatable string  `json:"memoryAllocatable"`
-	MemoryRequested   string  `json:"memoryRequested,omitempty"` // For allocation
-	MemoryUsed        string  `json:"memoryUsed,omitempty"`      // For utilization
-	MemoryPercent     float64 `json:"memoryPercent"`
-	FreeCPU           string  `json:"freeCPU,omitempty"`    // If showFree is true
-	FreeMemory        string  `json:"freeMemory,omitempty"` // If showFree is true
-	HostPorts         []int32 `json:"hostPorts,omitempty"`  // For allocation, if showHostPorts is true
+	Name                        string  `json:"name"`
+	CPUAllocatable              string  `json:"cpuAllocatable"`
+	CPURequested                string  `json:"cpuRequested,omitempty"` // For allocation
+	CPUUsed                     string  `json:"cpuUsed,omitempty"`      // For utilization
+	CPUPercent                  float64 `json:"cpuPercent"`
+	MemoryAllocatable           string  `json:"memoryAllocatable"`
+	MemoryRequested             string  `json:"memoryRequested,omitempty"` // For allocation
+	MemoryUsed                  string  `json:"memoryUsed,omitempty"`      // For utilization
+	MemoryPercent               float64 `json:"memoryPercent"`
+	EphemeralStorageAllocatable string  `json:"ephemeralStorageAllocatable,omitempty"`
+	EphemeralStorageRequested   string  `json:"ephemeralStorageRequested,omitempty"` // For allocation
+	EphemeralStorageUsed        string  `json:"ephemeralStorageUsed,omitempty"`      // For utilization
+	EphemeralStoragePercent     float64 `json:"ephemeralStoragePercent,omitempty"`
+	FreeCPU                     string  `json:"freeCPU,omitempty"`              // If showFree is true
+	FreeMemory                  string  `json:"freeMemory,omitempty"`           // If showFree is true
+	FreeEphemeralStorage        string  `json:"freeEphemeralStorage,omitempty"` // If showFree and showEphemeralStorage are true
+	HostPorts                   []int32 `json:"hostPorts,omitempty"`            // For allocation, if showHostPorts is true
 }
 
 // JSONPercentileDetail represents a single percentile data point in the summary.
@@ -53,10 +58,20 @@ type JSONHostPortSummary struct {
 
 // JSONSummary represents the summary section of the JSON output.
 type JSONSummary struct {
-	TotalNodes        int                    `json:"totalNodes"`
-	CPUPercentiles    []JSONPercentileDetail `json:"cpuPercentiles,omitempty"`
-	MemoryPercentiles []JSONPercentileDetail `json:"memoryPercentiles,omitempty"`
-	TopHostPorts      []JSONHostPortSummary  `json:"topHostPorts,omitempty"` // For allocation summary
+	TotalNodes                    int                    `json:"totalNodes"`
+	TotalCPUAllocatable           string                 `json:"totalCpuAllocatable"`
+	TotalCPURequestedOrUsed       string                 `json:"totalCpuRequestedOrUsed"` // Context-dependent
+	AverageCPUPercent             float64                `json:"averageCpuPercent"`
+	TotalMemoryAllocatable        string                 `json:"totalMemoryAllocatable"`
+	TotalMemoryRequestedOrUsed    string                 `json:"totalMemoryRequestedOrUsed"` // Context-dependent
+	AverageMemoryPercent          float64                `json:"averageMemoryPercent"`
+	TotalEphemeralAllocatable     string                 `json:"totalEphemeralAllocatable,omitempty"`
+	TotalEphemeralRequestedOrUsed string                 `json:"totalEphemeralRequestedOrUsed,omitempty"` // Context-dependent
+	AverageEphemeralPercent       float64                `json:"averageEphemeralPercent,omitempty"`
+	CPUPercentiles                []JSONPercentileDetail `json:"cpuPercentiles,omitempty"`    // Keeping existing percentile fields
+	MemoryPercentiles             []JSONPercentileDetail `json:"memoryPercentiles,omitempty"` // Keeping existing percentile fields
+	// TODO: Consider adding EphemeralStoragePercentiles if needed later
+	TopHostPorts []JSONHostPortSummary `json:"topHostPorts,omitempty"` // For allocation summary
 }
 
 // JSONOutput is the root structure for the JSON output.
