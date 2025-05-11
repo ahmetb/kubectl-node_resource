@@ -61,6 +61,11 @@ func ToJSONNode(nodeRes utils.NodeResult, cmdType utils.CmdType, displayOpts opt
 			jsonNode.EphemeralStorageRequested = utils.FormatMemory(nodeRes.ReqEphemeralStorage.Value())
 			jsonNode.EphemeralStoragePercent = nodeRes.EphemeralStoragePercent
 		}
+		if displayOpts.ShowGPU {
+			jsonNode.GPUAllocatable = utils.FormatGPU(nodeRes.AllocGPU)
+			jsonNode.GPURequested = utils.FormatGPU(nodeRes.ReqGPU)
+			jsonNode.GPUPercent = nodeRes.GPUPercent
+		}
 	} else if cmdType == utils.CmdTypeUtilization {
 		if displayOpts.ShowCPU {
 			jsonNode.CPUUsed = utils.FormatCPU(nodeRes.ReqCPU) // ReqCPU stores actual usage in utilization context
@@ -76,6 +81,11 @@ func ToJSONNode(nodeRes utils.NodeResult, cmdType utils.CmdType, displayOpts opt
 			jsonNode.EphemeralStorageUsed = utils.FormatMemory(nodeRes.ReqEphemeralStorage.Value())
 			jsonNode.EphemeralStoragePercent = nodeRes.EphemeralStoragePercent
 		}
+		if displayOpts.ShowGPU {
+			jsonNode.GPUAllocatable = utils.FormatGPU(nodeRes.AllocGPU) // Allocatable is still relevant
+			jsonNode.GPUUsed = utils.FormatGPU(nodeRes.ReqGPU)          // ReqGPU stores actual usage in utilization context for GPU
+			jsonNode.GPUPercent = nodeRes.GPUPercent
+		}
 	}
 
 	if displayOpts.ShowFree {
@@ -87,6 +97,9 @@ func ToJSONNode(nodeRes utils.NodeResult, cmdType utils.CmdType, displayOpts opt
 		}
 		if displayOpts.ShowEphemeralStorage { // Assuming FreeEphemeralStorage only makes sense if EphemeralStorage is shown
 			jsonNode.FreeEphemeralStorage = utils.FormatMemory(nodeRes.FreeEphemeralStorage.Value())
+		}
+		if displayOpts.ShowGPU { // Assuming FreeGPU only makes sense if GPU is shown
+			jsonNode.FreeGPU = utils.FormatGPU(nodeRes.FreeGPU)
 		}
 	}
 	return jsonNode

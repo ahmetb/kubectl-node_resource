@@ -77,6 +77,13 @@ Nodes can be filtered by a label selector.`,
 			if summaryOpt != utils.SummaryShow && summaryOpt != utils.SummaryOnly && summaryOpt != utils.SummaryHide {
 				return fmt.Errorf("invalid --summary value. Must be one of: %s, %s, %s", utils.SummaryShow, utils.SummaryOnly, utils.SummaryHide)
 			}
+
+			// Check if there's anything useful to display before proceeding
+			if !displayOpts.JSONOutput && !displayOpts.HasPrimaryDataColumns() {
+				fmt.Fprintln(streams.ErrOut, "Error: No data columns selected for display. Please enable at least one of --show-cpu, --show-memory, --show-gpu, --show-ephemeral-storage, --show-host-ports to display table data or generate a meaningful summary.")
+				return fmt.Errorf("no data columns selected for display")
+			}
+
 			var selector string
 			if len(args) > 0 {
 				selector = args[0]
@@ -84,7 +91,8 @@ Nodes can be filtered by a label selector.`,
 			klog.V(4).InfoS("Starting allocation command", "selector", selector, "sortBy", sortBy,
 				"showCPU", displayOpts.ShowCPU, "showMemory", displayOpts.ShowMemory,
 				"showHostPorts", displayOpts.ShowHostPorts, "showFree", displayOpts.ShowFree,
-				"showEphemeralStorage", displayOpts.ShowEphemeralStorage,
+				"showEphemeralStorage", displayOpts.ShowEphemeralStorage, "showGPU", displayOpts.ShowGPU,
+				"gpuResourceKey", displayOpts.GpuResourceKey,
 				"summary", summaryOpt, "json", displayOpts.JSONOutput)
 
 			runOpts := allocationRunOptions{
@@ -104,7 +112,9 @@ Nodes can be filtered by a label selector.`,
 	cmd.Flags().BoolVar(&displayOpts.ShowMemory, "show-memory", true, "Show memory allocation/utilization")
 	cmd.Flags().BoolVar(&displayOpts.ShowHostPorts, "show-host-ports", false, "Show host ports used by containers on each node")
 	cmd.Flags().BoolVar(&displayOpts.ShowEphemeralStorage, "show-ephemeral-storage", false, "Show ephemeral storage allocation/utilization")
-	cmd.Flags().BoolVar(&displayOpts.ShowFree, "show-free", false, "Show free CPU and Memory on each node")
+	cmd.Flags().BoolVar(&displayOpts.ShowGPU, "show-gpu", false, "Show GPU allocation/utilization")
+	cmd.Flags().StringVar(&displayOpts.GpuResourceKey, "gpu-resource-key", "nvidia.com/gpu", "The resource key for GPU counting")
+	cmd.Flags().BoolVar(&displayOpts.ShowFree, "show-free", false, "Show free CPU, Memory, Ephemeral Storage and GPU on each node")
 	cmd.Flags().StringVar(&summaryOpt, "summary", utils.SummaryShow, fmt.Sprintf("Summary display option: %s, %s, or %s", utils.SummaryShow, utils.SummaryOnly, utils.SummaryHide))
 	cmd.Flags().BoolVar(&displayOpts.JSONOutput, "json", false, "Output in JSON format")
 	opts.AddFlags(cmd.Flags())
@@ -176,17 +186,21 @@ func runAllocation(ctx context.Context, opts allocationRunOptions) error {
 			}
 			klog.V(5).InfoS("Pods listed for node", "nodeName", node.Name, "podCount", len(podList.Items))
 
-			var totalCPU, totalMem, totalEphemeralStorage resource.Quantity
+			var totalCPU, totalMem, totalEphemeralStorage, totalGPU resource.Quantity
 			hostPortsMap := make(map[int32]struct{})
 
 			for _, pod := range podList.Items {
 				if gCtx.Err() != nil { // Check for context cancellation from errgroup
 					return gCtx.Err()
 				}
-				podCPU, podMem, podEphemeralStorage := aggregatePodRequests(&pod)
+				// Pass GpuResourceKey to aggregatePodRequests
+				podCPU, podMem, podEphemeralStorage, podGPU := aggregatePodRequests(&pod, opts.DisplayOpts.GpuResourceKey)
 				totalCPU.Add(podCPU)
 				totalMem.Add(podMem)
 				totalEphemeralStorage.Add(podEphemeralStorage)
+				if opts.DisplayOpts.ShowGPU {
+					totalGPU.Add(podGPU)
+				}
 				// Always calculate host ports
 				for _, container := range pod.Spec.Containers {
 					for _, port := range container.Ports {
@@ -207,9 +221,18 @@ func runAllocation(ctx context.Context, opts allocationRunOptions) error {
 			allocCPU := node.Status.Allocatable.Cpu()
 			allocMem := node.Status.Allocatable.Memory()
 			allocEphemeralStorage := node.Status.Allocatable[corev1.ResourceEphemeralStorage]
+			var allocGPU resource.Quantity
+			if opts.DisplayOpts.ShowGPU {
+				allocGPU = node.Status.Allocatable[corev1.ResourceName(opts.DisplayOpts.GpuResourceKey)]
+			}
+
 			cpuPercent := utils.CalculatePercent(totalCPU.AsApproximateFloat64(), allocCPU.AsApproximateFloat64())
 			memPercent := utils.CalculatePercent(float64(totalMem.Value()), float64(allocMem.Value()))
 			ephemeralStoragePercent := utils.CalculatePercent(float64(totalEphemeralStorage.Value()), float64(allocEphemeralStorage.Value()))
+			var gpuPercent float64
+			if opts.DisplayOpts.ShowGPU {
+				gpuPercent = utils.CalculatePercent(totalGPU.AsApproximateFloat64(), allocGPU.AsApproximateFloat64())
+			}
 
 			freeCPU := allocCPU.DeepCopy()
 			freeCPU.Sub(totalCPU)
@@ -227,6 +250,14 @@ func runAllocation(ctx context.Context, opts allocationRunOptions) error {
 			freeEphemeralStorage.Sub(totalEphemeralStorage)
 			if freeEphemeralStorage.Sign() < 0 { // Ensure free is not negative
 				freeEphemeralStorage = *resource.NewQuantity(0, resource.BinarySI)
+			}
+			var freeGPU resource.Quantity
+			if opts.DisplayOpts.ShowGPU && opts.DisplayOpts.ShowFree {
+				freeGPU = allocGPU.DeepCopy()
+				freeGPU.Sub(totalGPU)
+				if freeGPU.Sign() < 0 { // Ensure free is not negative
+					freeGPU = *resource.NewQuantity(0, resource.DecimalSI) // GPUs are DecimalSI like CPU
+				}
 			}
 
 			var currentHostPorts []int32
@@ -251,8 +282,15 @@ func runAllocation(ctx context.Context, opts allocationRunOptions) error {
 				ReqEphemeralStorage:     totalEphemeralStorage,
 				EphemeralStoragePercent: ephemeralStoragePercent,
 				FreeEphemeralStorage:    freeEphemeralStorage,
+				// GPU
+				AllocGPU:   allocGPU,
+				ReqGPU:     totalGPU,
+				GPUPercent: gpuPercent,
+				FreeGPU:    freeGPU,
 			}
-			klog.V(5).InfoS("Finished processing node", "nodeName", node.Name, "reqCPU", totalCPU.String(), "reqMem", totalMem.String(), "reqEphemeralStorage", totalEphemeralStorage.String(), "freeCPU", freeCPU.String(), "freeMem", freeMem.String(), "freeEphemeralStorage", freeEphemeralStorage.String())
+			klog.V(5).InfoS("Finished processing node", "nodeName", node.Name,
+				"reqCPU", totalCPU.String(), "reqMem", totalMem.String(), "reqEphemeralStorage", totalEphemeralStorage.String(), "reqGPU", totalGPU.String(),
+				"freeCPU", freeCPU.String(), "freeMem", freeMem.String(), "freeEphemeralStorage", freeEphemeralStorage.String(), "freeGPU", freeGPU.String())
 
 			if progressHelper != nil {
 				// Pass the same prefix, or an updated one if needed for this stage
@@ -278,12 +316,6 @@ func runAllocation(ctx context.Context, opts allocationRunOptions) error {
 
 	utils.SortResults(results, opts.sortBy)
 	klog.V(4).InfoS("Results sorted", "sortBy", opts.sortBy)
-
-	// Check if there's anything useful to display before proceeding
-	if !opts.DisplayOpts.JSONOutput && !opts.DisplayOpts.HasPrimaryDataColumns() {
-		fmt.Fprintln(opts.streams.ErrOut, "Error: No data columns selected for display. Please enable at least one of --show-cpu, --show-memory, --show-ephemeral-storage, --show-host-ports to display table data or generate a meaningful summary.")
-		return fmt.Errorf("no data columns selected for display")
-	}
 
 	if opts.DisplayOpts.JSONOutput {
 		// JSON Output Path
@@ -316,6 +348,9 @@ func runAllocation(ctx context.Context, opts allocationRunOptions) error {
 	if opts.DisplayOpts.ShowEphemeralStorage {
 		headerSlice = append(headerSlice, "EPHEMERAL", "EPH REQ", "EPH%")
 	}
+	if opts.DisplayOpts.ShowGPU {
+		headerSlice = append(headerSlice, "GPU ALLOC", "GPU REQ", "GPU %")
+	}
 	if opts.DisplayOpts.ShowFree {
 		if opts.DisplayOpts.ShowCPU {
 			headerSlice = append(headerSlice, "FREE CPU")
@@ -325,6 +360,9 @@ func runAllocation(ctx context.Context, opts allocationRunOptions) error {
 		}
 		if opts.DisplayOpts.ShowEphemeralStorage { // Assuming FREE EPH only makes sense if EPH is shown
 			headerSlice = append(headerSlice, "FREE EPH")
+		}
+		if opts.DisplayOpts.ShowGPU { // Assuming FREE GPU only makes sense if GPU is shown
+			headerSlice = append(headerSlice, "FREE GPU")
 		}
 	}
 	if opts.DisplayOpts.ShowHostPorts {
@@ -341,6 +379,10 @@ func runAllocation(ctx context.Context, opts allocationRunOptions) error {
 		cpuColor := ui.PercentFontColor(res.CPUPercent)
 		memColor := ui.PercentFontColor(res.MemPercent)
 		ephColor := ui.PercentFontColor(res.EphemeralStoragePercent)
+		var gpuColor string
+		if opts.DisplayOpts.ShowGPU {
+			gpuColor = ui.PercentFontColor(res.GPUPercent)
+		}
 
 		var rowValues []string
 		rowValues = append(rowValues, res.Node.Name)
@@ -368,6 +410,14 @@ func runAllocation(ctx context.Context, opts allocationRunOptions) error {
 			)
 		}
 
+		if opts.DisplayOpts.ShowGPU {
+			rowValues = append(rowValues,
+				utils.FormatGPU(res.AllocGPU),
+				utils.FormatGPU(res.ReqGPU),
+				fmt.Sprintf("%s%.1f%%%s", gpuColor, res.GPUPercent, ui.ColorReset),
+			)
+		}
+
 		if opts.DisplayOpts.ShowFree {
 			if opts.DisplayOpts.ShowCPU {
 				freeCPUColor := ui.PercentBackgroundColor(res.CPUPercent) // Color based on usage
@@ -385,6 +435,12 @@ func runAllocation(ctx context.Context, opts allocationRunOptions) error {
 				freeEphColor := ui.PercentBackgroundColor(res.EphemeralStoragePercent) // Color based on usage
 				rowValues = append(rowValues,
 					fmt.Sprintf("%s%s%s", freeEphColor, utils.FormatMemory(res.FreeEphemeralStorage.Value()), ui.ColorReset),
+				)
+			}
+			if opts.DisplayOpts.ShowGPU { // Assuming FREE GPU only makes sense if GPU is shown
+				freeGPUColor := ui.PercentBackgroundColor(res.GPUPercent) // Color based on usage
+				rowValues = append(rowValues,
+					fmt.Sprintf("%s%s%s", freeGPUColor, utils.FormatGPU(res.FreeGPU), ui.ColorReset),
 				)
 			}
 		}
@@ -423,12 +479,15 @@ func runAllocation(ctx context.Context, opts allocationRunOptions) error {
 	return nil
 }
 
-// aggregatePodRequests calculates the total CPU, memory, and ephemeral storage requests for a single pod,
+// aggregatePodRequests calculates the total CPU, memory, ephemeral storage, and GPU requests for a single pod,
 // considering init containers as per Kubernetes resource accounting.
-func aggregatePodRequests(pod *corev1.Pod) (resource.Quantity, resource.Quantity, resource.Quantity) {
+func aggregatePodRequests(pod *corev1.Pod, gpuResourceKey string) (resource.Quantity, resource.Quantity, resource.Quantity, resource.Quantity) {
 	sumCPU := *resource.NewQuantity(0, resource.DecimalSI)
 	sumMem := *resource.NewQuantity(0, resource.BinarySI)
 	sumEphemeralStorage := *resource.NewQuantity(0, resource.BinarySI)
+	sumGPU := *resource.NewQuantity(0, resource.DecimalSI) // GPUs are typically whole numbers, like CPU
+
+	gpuResName := corev1.ResourceName(gpuResourceKey)
 
 	// Regular containers
 	for _, container := range pod.Spec.Containers {
@@ -441,19 +500,16 @@ func aggregatePodRequests(pod *corev1.Pod) (resource.Quantity, resource.Quantity
 		if req, ok := container.Resources.Requests[corev1.ResourceEphemeralStorage]; ok {
 			sumEphemeralStorage.Add(req)
 		}
+		if req, ok := container.Resources.Requests[gpuResName]; ok {
+			sumGPU.Add(req)
+		}
 	}
 
 	// Init containers: effective request is the max of (sum of app container requests, max init container request)
-	// This logic needs to be applied carefully. The pod's effective request is the higher of:
-	// 1. Sum of all app containers.
-	// 2. Max of any init container.
-	// So, we calculate sumCPU/sumMem for app containers first.
-	// Then, we find the max request for init containers.
-	// The final pod request for a resource is max(sum_app_container_resource, max_init_container_resource).
-
 	maxInitCPU := *resource.NewQuantity(0, resource.DecimalSI)
 	maxInitMem := *resource.NewQuantity(0, resource.BinarySI)
 	maxInitEphemeralStorage := *resource.NewQuantity(0, resource.BinarySI)
+	maxInitGPU := *resource.NewQuantity(0, resource.DecimalSI)
 
 	for _, container := range pod.Spec.InitContainers {
 		if req, ok := container.Resources.Requests[corev1.ResourceCPU]; ok {
@@ -471,6 +527,11 @@ func aggregatePodRequests(pod *corev1.Pod) (resource.Quantity, resource.Quantity
 				maxInitEphemeralStorage = req.DeepCopy()
 			}
 		}
+		if req, ok := container.Resources.Requests[gpuResName]; ok {
+			if req.Cmp(maxInitGPU) > 0 {
+				maxInitGPU = req.DeepCopy()
+			}
+		}
 	}
 
 	// The pod's effective request for a resource is the maximum of
@@ -485,8 +546,11 @@ func aggregatePodRequests(pod *corev1.Pod) (resource.Quantity, resource.Quantity
 	if maxInitEphemeralStorage.Cmp(sumEphemeralStorage) > 0 {
 		sumEphemeralStorage = maxInitEphemeralStorage.DeepCopy()
 	}
+	if maxInitGPU.Cmp(sumGPU) > 0 {
+		sumGPU = maxInitGPU.DeepCopy()
+	}
 
-	return sumCPU, sumMem, sumEphemeralStorage
+	return sumCPU, sumMem, sumEphemeralStorage, sumGPU
 }
 
 func setKubectlTableStyle(table *tablewriter.Table) {

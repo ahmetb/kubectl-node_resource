@@ -125,10 +125,17 @@ The `allocation` command additionally supports:
 
 - `--show-host-ports`: (Default: `false`) Show host ports used by containers on each node.
 - `--show-ephemeral-storage`: (Default: `false`) Show ephemeral storage allocation details.
+- `--show-gpu`: (Default: `false`) Show GPU allocation details.
+- `--gpu-resource-key`: (Default: `"nvidia.com/gpu"`) Specify the resource key for GPU counting (e.g., `amd.com/gpu`).
 
-These flags allow you to tailor the output to focus on the specific resources you are interested in. For example, to see only memory and ephemeral storage for allocations:
+These flags allow you to tailor the output to focus on the specific resources you are interested in. For example, to see only memory, ephemeral storage, and GPU (using the default key) for allocations:
 ```bash
-kubectl node-resource allocation --show-cpu=false --show-memory --show-ephemeral-storage
+kubectl node-resource allocation --show-cpu=false --show-memory --show-ephemeral-storage --show-gpu
+```
+
+For example, to show AMD GPUs, run:
+```bash
+kubectl node-resource allocation --show-gpu --gpu-resource-key=amd.com/gpu
 ```
 
 ### `utilization` subcommand

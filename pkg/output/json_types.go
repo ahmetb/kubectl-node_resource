@@ -39,7 +39,12 @@ type JSONNode struct {
 	FreeCPU                     string  `json:"freeCPU,omitempty"`              // If showFree is true
 	FreeMemory                  string  `json:"freeMemory,omitempty"`           // If showFree is true
 	FreeEphemeralStorage        string  `json:"freeEphemeralStorage,omitempty"` // If showFree and showEphemeralStorage are true
-	HostPorts                   []int32 `json:"hostPorts,omitempty"`            // For allocation, if showHostPorts is true
+	GPUAllocatable              string  `json:"gpuAllocatable,omitempty"`
+	GPURequested                string  `json:"gpuRequested,omitempty"` // For allocation
+	GPUUsed                     string  `json:"gpuUsed,omitempty"`      // For utilization
+	GPUPercent                  float64 `json:"gpuPercent,omitempty"`
+	FreeGPU                     string  `json:"freeGPU,omitempty"`   // If showFree and showGPU are true
+	HostPorts                   []int32 `json:"hostPorts,omitempty"` // For allocation, if showHostPorts is true
 }
 
 // JSONPercentileDetail represents a single percentile data point in the summary.
@@ -68,9 +73,13 @@ type JSONSummary struct {
 	TotalEphemeralAllocatable     string                 `json:"totalEphemeralAllocatable,omitempty"`
 	TotalEphemeralRequestedOrUsed string                 `json:"totalEphemeralRequestedOrUsed,omitempty"` // Context-dependent
 	AverageEphemeralPercent       float64                `json:"averageEphemeralPercent,omitempty"`
+	TotalGPUAllocatable           string                 `json:"totalGpuAllocatable,omitempty"`
+	TotalGPURequestedOrUsed       string                 `json:"totalGpuRequestedOrUsed,omitempty"` // Context-dependent
+	AverageGPUPercent             float64                `json:"averageGpuPercent,omitempty"`
 	CPUPercentiles                []JSONPercentileDetail `json:"cpuPercentiles,omitempty"`    // Keeping existing percentile fields
 	MemoryPercentiles             []JSONPercentileDetail `json:"memoryPercentiles,omitempty"` // Keeping existing percentile fields
 	EphemeralStoragePercentiles   []JSONPercentileDetail `json:"ephemeralStoragePercentiles,omitempty"`
+	GPUPercentiles                []JSONPercentileDetail `json:"gpuPercentiles,omitempty"`
 	TopHostPorts                  []JSONHostPortSummary  `json:"topHostPorts,omitempty"` // For allocation summary
 }
 

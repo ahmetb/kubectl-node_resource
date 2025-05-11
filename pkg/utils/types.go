@@ -38,6 +38,12 @@ type NodeResult struct {
 	ReqEphemeralStorage     resource.Quantity
 	EphemeralStoragePercent float64
 	FreeEphemeralStorage    resource.Quantity
+
+	// GPU fields
+	AllocGPU   resource.Quantity
+	ReqGPU     resource.Quantity
+	GPUPercent float64
+	FreeGPU    resource.Quantity
 }
 
 // CmdType indicates the command type for shared functions

@@ -63,6 +63,14 @@ Kubernetes metrics-server to be installed and running in the cluster.`,
   kubectl node-resource utilization "role=worker"`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+
+			// Check if there's anything to display before proceeding
+			// For utilization, ShowHostPorts and ShowEphemeralStorage are implicitly false in DisplayOpts.
+			if !displayOpts.JSONOutput && summaryOpt == utils.SummaryHide && !displayOpts.HasPrimaryDataColumns() {
+				fmt.Fprintln(streams.ErrOut, "Error: No data selected for display. Please enable at least one of --show-cpu, --show-memory, or ensure summary is not hidden, or use --json.")
+				return fmt.Errorf("no data selected for display")
+			}
+
 			if sortBy != utils.SortByCPUPercent && sortBy != utils.SortByMemoryPercent && sortBy != utils.SortByNodeName {
 				return fmt.Errorf("invalid --sort-by value. Must be one of: %s, %s, or %s", utils.SortByCPUPercent, utils.SortByMemoryPercent, utils.SortByNodeName)
 			}
@@ -207,13 +215,6 @@ func runUtilization(ctx context.Context, opts utilizationRunOptions) error {
 
 	utils.SortResults(results, opts.sortBy)
 	klog.V(4).InfoS("Utilization results sorted", "sortBy", opts.sortBy)
-
-	// Check if there's anything to display before proceeding
-	// For utilization, ShowHostPorts and ShowEphemeralStorage are implicitly false in DisplayOpts.
-	if !opts.displayOpts.JSONOutput && opts.summaryOpt == utils.SummaryHide && !opts.displayOpts.HasPrimaryDataColumns() {
-		fmt.Fprintln(opts.streams.ErrOut, "Error: No data selected for display. Please enable at least one of --show-cpu, --show-memory, or ensure summary is not hidden, or use --json.")
-		return fmt.Errorf("no data selected for display")
-	}
 
 	if opts.displayOpts.JSONOutput {
 		// JSON Output Path

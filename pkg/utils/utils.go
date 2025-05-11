@@ -93,6 +93,11 @@ func FormatMemory(bytes int64) string {
 	}
 }
 
+// FormatGPU formats a GPU quantity as a string (integer value).
+func FormatGPU(q resource.Quantity) string {
+	return q.String() // GPUs are typically whole numbers
+}
+
 // CalculatePercent calculates the percentage of used resources against the total.
 // It returns 0 if the total is 0 to avoid division by zero.
 func CalculatePercent(used, total float64) float64 {
@@ -119,6 +124,9 @@ func SortResults(results []NodeResult, sortBy string) {
 			if results[i].EphemeralStoragePercent != results[j].EphemeralStoragePercent {
 				return results[i].EphemeralStoragePercent > results[j].EphemeralStoragePercent
 			}
+			if results[i].GPUPercent != results[j].GPUPercent {
+				return results[i].GPUPercent > results[j].GPUPercent
+			}
 			return results[i].Node.Name < results[j].Node.Name
 		case SortByMemoryPercent:
 			if results[i].MemPercent != results[j].MemPercent {
@@ -131,6 +139,9 @@ func SortResults(results []NodeResult, sortBy string) {
 			if results[i].EphemeralStoragePercent != results[j].EphemeralStoragePercent {
 				return results[i].EphemeralStoragePercent > results[j].EphemeralStoragePercent
 			}
+			if results[i].GPUPercent != results[j].GPUPercent {
+				return results[i].GPUPercent > results[j].GPUPercent
+			}
 			return results[i].Node.Name < results[j].Node.Name
 		case SortByEphemeralStoragePercent:
 			if results[i].EphemeralStoragePercent != results[j].EphemeralStoragePercent {
@@ -142,6 +153,9 @@ func SortResults(results []NodeResult, sortBy string) {
 			}
 			if results[i].MemPercent != results[j].MemPercent {
 				return results[i].MemPercent > results[j].MemPercent
+			}
+			if results[i].GPUPercent != results[j].GPUPercent {
+				return results[i].GPUPercent > results[j].GPUPercent
 			}
 			return results[i].Node.Name < results[j].Node.Name
 		default: // SortByNodeName

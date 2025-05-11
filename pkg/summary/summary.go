@@ -34,7 +34,8 @@ import (
 // --- Functions to get summary data as structs ---
 
 // GetResourcePercentilesData calculates and returns percentiles for a given resource.
-func GetResourcePercentilesData(results []utils.NodeResult, resourceName string, summaryContext string, showEphemeralStorage bool) []output.JSONPercentileDetail { // Added showEphemeralStorage
+// The showSpecificResource flag (like showEphemeralStorage or showGPU) should be checked by the caller.
+func GetResourcePercentilesData(results []utils.NodeResult, resourceName string, summaryContext string) []output.JSONPercentileDetail {
 	if len(results) == 0 {
 		return []output.JSONPercentileDetail{}
 	}
@@ -52,11 +53,12 @@ func GetResourcePercentilesData(results []utils.NodeResult, resourceName string,
 			return sortedResults[i].MemPercent < sortedResults[j].MemPercent
 		})
 	case "EphemeralStorage":
-		if !showEphemeralStorage { // Should not be called if false, but defensive
-			return []output.JSONPercentileDetail{}
-		}
 		sort.Slice(sortedResults, func(i, j int) bool {
 			return sortedResults[i].EphemeralStoragePercent < sortedResults[j].EphemeralStoragePercent
+		})
+	case "GPU":
+		sort.Slice(sortedResults, func(i, j int) bool {
+			return sortedResults[i].GPUPercent < sortedResults[j].GPUPercent
 		})
 	default:
 		return []output.JSONPercentileDetail{} // Should not happen
@@ -98,6 +100,9 @@ func GetResourcePercentilesData(results []utils.NodeResult, resourceName string,
 		case "EphemeralStorage":
 			valueString = utils.FormatMemory(nodeRes.ReqEphemeralStorage.Value()) // Assuming FormatMemory is suitable
 			percentValue = nodeRes.EphemeralStoragePercent
+		case "GPU":
+			valueString = utils.FormatGPU(nodeRes.ReqGPU)
+			percentValue = nodeRes.GPUPercent
 		}
 		jsonData = append(jsonData, output.JSONPercentileDetail{
 			Percentile: pDef.Codename, // Use Codename for JSON
@@ -190,7 +195,7 @@ func GetNodeResourceSummaryData(results []utils.NodeResult, displayOpts options.
 		summary.TotalCPUAllocatable = utils.FormatCPU(*resource.NewMilliQuantity(int64(totalCPUAlloc*1000), resource.DecimalSI))
 		summary.TotalCPURequestedOrUsed = utils.FormatCPU(*resource.NewMilliQuantity(int64(totalCPUReqOrUsed*1000), resource.DecimalSI))
 		summary.AverageCPUPercent = avgCPUPercent
-		summary.CPUPercentiles = GetResourcePercentilesData(results, "CPU", summaryContext, displayOpts.ShowEphemeralStorage) // Pass through showEphemeralStorage for consistency, though not used by CPU
+		summary.CPUPercentiles = GetResourcePercentilesData(results, "CPU", summaryContext)
 	}
 
 	if displayOpts.ShowMemory {
@@ -207,7 +212,7 @@ func GetNodeResourceSummaryData(results []utils.NodeResult, displayOpts options.
 		summary.TotalMemoryAllocatable = utils.FormatMemory(int64(totalMemAlloc))
 		summary.TotalMemoryRequestedOrUsed = utils.FormatMemory(int64(totalMemReqOrUsed))
 		summary.AverageMemoryPercent = avgMemPercent
-		summary.MemoryPercentiles = GetResourcePercentilesData(results, "Memory", summaryContext, displayOpts.ShowEphemeralStorage) // Pass through showEphemeralStorage for consistency, though not used by Memory
+		summary.MemoryPercentiles = GetResourcePercentilesData(results, "Memory", summaryContext)
 	}
 
 	if displayOpts.ShowEphemeralStorage {
@@ -224,7 +229,24 @@ func GetNodeResourceSummaryData(results []utils.NodeResult, displayOpts options.
 		summary.TotalEphemeralAllocatable = utils.FormatMemory(int64(totalEphAlloc))
 		summary.TotalEphemeralRequestedOrUsed = utils.FormatMemory(int64(totalEphReqOrUsed))
 		summary.AverageEphemeralPercent = avgEphPercent
-		summary.EphemeralStoragePercentiles = GetResourcePercentilesData(results, "EphemeralStorage", summaryContext, true) // Explicitly true as we are in the ShowEphemeralStorage block
+		summary.EphemeralStoragePercentiles = GetResourcePercentilesData(results, "EphemeralStorage", summaryContext)
+	}
+
+	if displayOpts.ShowGPU {
+		var totalGPUAlloc, totalGPUReqOrUsed, sumGPUPercent float64
+		for _, res := range results {
+			totalGPUAlloc += res.AllocGPU.AsApproximateFloat64() // GPUs are often whole numbers
+			totalGPUReqOrUsed += res.ReqGPU.AsApproximateFloat64()
+			sumGPUPercent += res.GPUPercent
+		}
+		avgGPUPercent := 0.0
+		if len(results) > 0 {
+			avgGPUPercent = sumGPUPercent / float64(len(results))
+		}
+		summary.TotalGPUAllocatable = utils.FormatGPU(*resource.NewQuantity(int64(totalGPUAlloc), resource.DecimalSI))
+		summary.TotalGPURequestedOrUsed = utils.FormatGPU(*resource.NewQuantity(int64(totalGPUReqOrUsed), resource.DecimalSI))
+		summary.AverageGPUPercent = avgGPUPercent
+		summary.GPUPercentiles = GetResourcePercentilesData(results, "GPU", summaryContext)
 	}
 
 	if cmdType == utils.CmdTypeAllocation && displayOpts.ShowHostPorts {
@@ -272,6 +294,11 @@ func PrintNodeResourceSummary(results []utils.NodeResult, displayOpts options.Di
 		printResourceDistributionHistogram(results, summaryContext, "EphemeralStorage", out)
 	}
 
+	if displayOpts.ShowGPU {
+		printResourcePercentiles(results, summaryContext, "GPU", out)
+		printResourceDistributionHistogram(results, summaryContext, "GPU", out)
+	}
+
 	if cmdType == utils.CmdTypeAllocation && displayOpts.ShowHostPorts {
 		printTopHostPorts(results, out)
 	}
@@ -307,6 +334,11 @@ func printResourcePercentiles(results []utils.NodeResult, summaryContext string,
 			return sortedResults[i].EphemeralStoragePercent < sortedResults[j].EphemeralStoragePercent
 		})
 		fmt.Fprintf(out, "\nEphemeral Storage %s Percentiles (based on %% of allocatable Ephemeral Storage %s):\n", summaryContext, contextVerb)
+	case "GPU":
+		sort.Slice(sortedResults, func(i, j int) bool {
+			return sortedResults[i].GPUPercent < sortedResults[j].GPUPercent
+		})
+		fmt.Fprintf(out, "\nGPU %s Percentiles (based on %% of allocatable GPU %s):\n", summaryContext, contextVerb)
 	default:
 		// This case should ideally not be reached if called correctly
 		fmt.Fprintf(out, "\nUnknown resource for percentiles: %s\n", resourceName)
@@ -352,6 +384,9 @@ func printResourcePercentiles(results []utils.NodeResult, summaryContext string,
 		case "EphemeralStorage":
 			valueString = utils.FormatMemory(nodeRes.ReqEphemeralStorage.Value()) // Assuming FormatMemory is suitable
 			percentValue = nodeRes.EphemeralStoragePercent
+		case "GPU":
+			valueString = utils.FormatGPU(nodeRes.ReqGPU)
+			percentValue = nodeRes.GPUPercent
 		default:
 			// Should not happen if resourceName validation is done prior or switch is exhaustive
 			valueString = "N/A"
@@ -394,6 +429,8 @@ func printResourceDistributionHistogram(results []utils.NodeResult, summaryConte
 			percentValue = res.MemPercent
 		case "EphemeralStorage":
 			percentValue = res.EphemeralStoragePercent
+		case "GPU":
+			percentValue = res.GPUPercent
 		default:
 			// Should not happen if called correctly
 			continue
