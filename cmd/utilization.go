@@ -127,7 +127,13 @@ func runUtilization(ctx context.Context, opts utilizationRunOptions) error {
 	}
 
 	// Context for Kubernetes API calls is now passed in (cmd.Context())
-	allNodes, err := utils.GetAllNodesWithPagination(ctx, clientset, opts.nodeSelector)
+	var allNodes []corev1.Node
+	err = ui.RunWithSpinner("Querying nodes from the API server...", func() error {
+		var fetchErr error
+		allNodes, fetchErr = utils.GetAllNodesWithPagination(ctx, clientset, opts.nodeSelector)
+		return fetchErr
+	}, opts.streams.ErrOut)
+
 	if err != nil {
 		return fmt.Errorf("failed to get all nodes with pagination for utilization (selector: %s): %w", opts.nodeSelector, err)
 	}
@@ -140,7 +146,13 @@ func runUtilization(ctx context.Context, opts utilizationRunOptions) error {
 	klog.V(4).InfoS("Fetching node metrics")
 	// Note: NodeMetricses().List does not support pagination in the same way core resources do.
 	// It typically returns all metrics in one go.
-	metricsList, err := metricsClient.MetricsV1beta1().NodeMetricses().List(ctx, metav1.ListOptions{})
+	var metricsList *metricsv.NodeMetricsList
+	err = ui.RunWithSpinner("Querying metrics API for node stats...", func() error {
+		var fetchErr error
+		metricsList, fetchErr = metricsClient.MetricsV1beta1().NodeMetricses().List(ctx, metav1.ListOptions{})
+		return fetchErr
+	}, opts.streams.ErrOut)
+
 	if err != nil {
 		// klog.ErrorS is appropriate here as it's a significant failure point for this command.
 		klog.ErrorS(err, "Failed to list node metrics. Ensure metrics-server is installed and running.")

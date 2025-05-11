@@ -137,7 +137,13 @@ func runAllocation(ctx context.Context, opts allocationRunOptions) error {
 	}
 
 	// Context for Kubernetes API calls is now passed in (cmd.Context())
-	allNodes, err := utils.GetAllNodesWithPagination(ctx, clientset, opts.nodeSelector)
+	var allNodes []corev1.Node
+	err = ui.RunWithSpinner("Querying nodes from the API server...", func() error {
+		var fetchErr error
+		allNodes, fetchErr = utils.GetAllNodesWithPagination(ctx, clientset, opts.nodeSelector)
+		return fetchErr
+	}, opts.streams.ErrOut)
+
 	if err != nil {
 		return fmt.Errorf("failed to get all nodes with pagination (selector: %s): %w", opts.nodeSelector, err)
 	}
