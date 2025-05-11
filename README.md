@@ -39,9 +39,10 @@ resource pressure on each node.
 
 This plugin offers two main subcommands:
 
-- [**`utilization`**](#utilization-subcommand): Show pod resource allocations on nodes
-- [**`allocation`**](#allocation-subcommand): Show actual resource utilization on nodes.
-
+- [**`utilization`**](#utilization-subcommand): Show actual resource utilization
+  on nodes.
+- [**`allocation`**](#allocation-subcommand): Show pod resource allocations on
+  nodes.
 
 ### `allocation` subcommand
 
@@ -52,25 +53,36 @@ resources requested.
 
 **Examples:**
 
-1.  Show allocation for all nodes, sorted by CPU percentage (default sort):
-    ```bash
-    kubectl node-resource allocation
-    ```
-
-2.  Show allocation for nodes with the label `role=worker`, and also display host ports used by containers on these nodes:
-    ```bash
-    kubectl node-resource allocation "role=worker" --show-host-ports
-    ```
-
-3.  Show only the summary of allocation for nodes matching the label `pool=high-memory`, hiding the detailed table:
-    ```bash
-    kubectl node-resource allocation "pool=high-memory" --summary=only
-    ```
-
-4.  Show allocation for a specific node named `node1`, sorted by memory percentage, and include free (allocatable - requested) resources:
-    ```bash
-    kubectl node-resource allocation "kubernetes.io/hostname=node1" --sort-by=mem-percent --show-free
-    ```
+<table>
+  <thead>
+    <tr>
+      <th>Usage</th>
+      <th>Command</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Show allocation for all nodes, sorted by CPU percentage (default sort).</td>
+      <td><pre>kubectl node-resource allocation</pre></td>
+    </tr>
+    <tr>
+      <td>Show allocation for nodes with the label <code>role=worker</code>, and also display host ports used by containers on these nodes.</td>
+      <td><pre>kubectl node-resource allocation "role=worker" \
+	--show-host-ports</pre></td>
+    </tr>
+    <tr>
+      <td>Show only the summary of allocation for nodes matching the label <code>pool=high-memory</code>, hiding the detailed table.</td>
+      <td><pre>kubectl node-resource allocation "pool=high-memory" \
+	--summary=only</pre></td>
+    </tr>
+    <tr>
+      <td>Show allocation for a specific node named <code>node1</code>, sorted by memory percentage, and include free (allocatable - requested) resources.</td>
+      <td><pre>kubectl node-resource allocation "kubernetes.io/hostname=node1" \
+	--sort-by=mem-percent \
+	--show-free</pre></td>
+    </tr>
+  </tbody>
+</table>
 
 ### `utilization` subcommand
 
@@ -82,25 +94,35 @@ in the cluster.
 
 **Examples:**
 
-1.  Show utilization for all nodes, sorted by CPU percentage (default sort):
-    ```bash
-    kubectl node-resource utilization
-    ```
-
-2.  Show utilization for nodes with the label `role=worker`:
-    ```bash
-    kubectl node-resource utilization "role=worker"
-    ```
-
-3.  Show utilization and include a column for free (allocatable - used) resources:
-    ```bash
-    kubectl node-resource utilization --show-free
-    ```
-
-4.  Show utilization for all nodes, sorted by memory percentage, and output in JSON format:
-    ```bash
-    kubectl node-resource utilization --sort-by=mem-percent --json
-    ```
+<table>
+  <thead>
+    <tr>
+      <th>Usage</th>
+      <th>Command</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Show utilization for all nodes, sorted by CPU percentage (default sort).</td>
+      <td><pre>kubectl node-resource utilization</pre></td>
+    </tr>
+    <tr>
+      <td>Show utilization for nodes with the label <code>role=worker</code>.</td>
+      <td><pre>kubectl node-resource utilization "role=worker"</pre></td>
+    </tr>
+    <tr>
+      <td>Show utilization and include a column for free (allocatable - used) resources.</td>
+      <td><pre>kubectl node-resource utilization \
+	--show-free</pre></td>
+    </tr>
+    <tr>
+      <td>Show utilization for all nodes, sorted by memory percentage, and output in JSON format.</td>
+      <td><pre>kubectl node-resource utilization \
+	--sort-by=mem-percent \
+	--json</pre></td>
+    </tr>
+  </tbody>
+</table>
 
 ## License
 
