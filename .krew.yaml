@@ -1,0 +1,38 @@
+apiVersion: krew.googlecontainertools.github.com/v1alpha2
+kind: Plugin
+metadata:
+  name: node-resource
+spec:
+  version: {{ .TagName }}
+  homepage: https://github.com/ahmetb/kubectl-node_resource
+  shortDescription: Show node allocations/utilization list or summary
+  description: |
+    Show node CPU/memory allocations (pod requests) and actual utilizations
+    for all nodes in the cluster, or a subset of nodes (by label selector),
+    either as a list and/or, as a summary table with histograms/percentiles.
+    Optimized to work in large clusters with many nodes and pods.
+  platforms:
+  - selector:
+      matchLabels:
+        os: darwin
+        arch: amd64
+    {{addURIAndSha "https://github.com/ahmetb/kubectl-node_resource/releases/download/{{ .TagName }}/kubectl-node_resource_{{ .TagName }}_darwin_amd64.tar.gz" .TagName }}
+    bin: kubectl-node_resource
+  - selector:
+      matchLabels:
+        os: darwin
+        arch: arm64
+    {{addURIAndSha "https://github.com/ahmetb/kubectl-node_resource/releases/download/{{ .TagName }}/kubectl-node_resource_{{ .TagName }}_darwin_arm64.tar.gz" .TagName }}
+    bin: kubectl-node_resource
+  - selector:
+      matchLabels:
+        os: linux
+        arch: amd64
+    {{addURIAndSha "https://github.com/ahmetb/kubectl-node_resource/releases/download/{{ .TagName }}/kubectl-node_resource_{{ .TagName }}_linux_amd64.tar.gz" .TagName }}
+    bin: kubectl-node_resource
+  - selector:
+      matchLabels:
+        os: windows
+        arch: amd64
+    {{addURIAndSha "https://github.com/ahmetb/kubectl-node_resource/releases/download/{{ .TagName }}/kubectl-node_resource_{{ .TagName }}_windows_amd64.tar.gz" .TagName }}
+    bin: kubectl-node_resource.exe

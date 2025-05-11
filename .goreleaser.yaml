@@ -1,0 +1,29 @@
+version: 2
+before:
+  hooks:
+  - go mod download
+builds:
+- id: kubectl-node_resource
+  main: .
+  binary: kubectl-pods_on
+  env:
+  - CGO_ENABLED=0
+  goos:
+  - linux
+  - darwin
+  - windows
+  goarch:
+  - amd64
+  - arm64
+  ignore:
+  - goos: windows
+    goarch: arm64
+
+archives:
+- builds:
+  - kubectl-node_resource
+  name_template: "{{ .ProjectName }}_{{ .Tag }}_{{ .Os }}_{{ .Arch }}{{ if .Arm }}v{{ .Arm }}{{ end }}"
+  wrap_in_directory: false
+  format: tar.gz
+  files:
+  - LICENSE
