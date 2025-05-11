@@ -1,4 +1,4 @@
-// Package cmd implements the subcommands for the kubectl-node-resources plugin.
+// Package cmd implements the subcommands for the kubectl node-resource plugin.
 package cmd
 
 import (
@@ -18,6 +18,10 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/sync/errgroup"
 	corev1 "k8s.io/api/core/v1"
+
+	// Added for JSON output
+	"kubectl-node_resources/pkg/output"
+
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
@@ -32,37 +36,38 @@ import (
 	"kubectl-node_resources/pkg/ui"
 )
 
-// newAllocationsCmd returns the allocations subcommand.
-// This command displays resource allocations (sum of pod resource requests) for nodes.
-func newAllocationsCmd(streams genericclioptions.IOStreams) *cobra.Command {
+// newAllocationCmd returns the allocation subcommand.
+// This command displays resource allocation (sum of pod resource requests) for nodes.
+func newAllocationCmd(streams genericclioptions.IOStreams) *cobra.Command {
 	opts := genericclioptions.NewConfigFlags(true)
 	var (
 		sortBy        string
 		showHostPorts bool
 		showFree      bool // Added for --show-free
 		summaryOpt    string
+		jsonOutput    bool // Added for --json
 	)
 
 	cmd := &cobra.Command{
-		Use:   "allocations [node-selector]",
-		Short: "Show resource allocations for nodes (sum of pod resource requests)",
+		Use:   "allocation [node-selector]",
+		Short: "Show resource allocation for nodes (sum of pod resource requests)",
 		Long: `Displays a table of nodes with their allocatable CPU and memory,
 the sum of CPU and memory requests from pods running on them,
 and the percentage of allocatable resources requested.
 
 Optionally, it can show host ports used by containers on each node.
 Nodes can be filtered by a label selector.`,
-		Example: `  # Show allocations for, sorted by CPU percentage
-  kubectl node-resources allocations --sort-by=cpu-percent
+		Example: `  # Show allocation for, sorted by CPU percentage
+  kubectl node-resource allocation --sort-by=cpu-percent
 
-  # Show allocations for nodes with label 'role=worker', showing host ports
-  kubectl node-resources allocations "role=worker" --show-host-ports
+  # Show allocation for nodes with label 'role=worker', showing host ports
+  kubectl node-resource allocation "role=worker" --show-host-ports
 
   # Show only the allocation summary for nodes
-  kubectl node-resources allocations "role=worker" --summary=only
+  kubectl node-resource allocation "role=worker" --summary=only
 
-  # Show allocations for a specific node
-  kubectl node-resources allocations "kubernetes.io/hostname=node1"`,
+  # Show allocation for a specific node
+  kubectl node-resource allocation "kubernetes.io/hostname=node1"`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if sortBy != utils.SortByCPUPercent && sortBy != utils.SortByMemoryPercent && sortBy != utils.SortByNodeName {
@@ -75,9 +80,9 @@ Nodes can be filtered by a label selector.`,
 			if len(args) > 0 {
 				selector = args[0]
 			}
-			klog.V(4).InfoS("Starting allocations command", "selector", selector, "sortBy", sortBy, "showHostPorts", showHostPorts, "showFree", showFree, "summary", summaryOpt)
-
-			return runAllocations(cmd.Context(), opts, selector, sortBy, showHostPorts, showFree, summaryOpt, streams)
+			klog.V(4).InfoS("Starting allocation command", "selector", selector, "sortBy", sortBy, "showHostPorts", showHostPorts, "showFree", showFree, "summary", summaryOpt, "json", jsonOutput)
+			// Pass jsonOutput to runAllocation
+			return runAllocation(cmd.Context(), opts, selector, sortBy, showHostPorts, showFree, summaryOpt, jsonOutput, streams)
 		},
 	}
 
@@ -85,13 +90,14 @@ Nodes can be filtered by a label selector.`,
 	cmd.Flags().BoolVar(&showHostPorts, "show-host-ports", false, "Show host ports used by containers on each node")
 	cmd.Flags().BoolVar(&showFree, "show-free", false, "Show free CPU and Memory on each node") // Added flag
 	cmd.Flags().StringVar(&summaryOpt, "summary", utils.SummaryShow, fmt.Sprintf("Summary display option: %s, %s, or %s", utils.SummaryShow, utils.SummaryOnly, utils.SummaryHide))
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSON format") // Added --json flag
 	opts.AddFlags(cmd.Flags())
 	return cmd
 }
 
-// runAllocations executes the core logic for the allocations command.
+// runAllocation executes the core logic for the allocation command.
 // It fetches node and pod data, calculates resource allocations, and prints the results.
-func runAllocations(ctx context.Context, configFlags *genericclioptions.ConfigFlags, nodeSelector string, sortBy string, showHostPorts bool, showFree bool, summaryOpt string, streams genericclioptions.IOStreams) error {
+func runAllocation(ctx context.Context, configFlags *genericclioptions.ConfigFlags, nodeSelector string, sortBy string, showHostPorts bool, showFree bool, summaryOpt string, jsonOutputFlag bool, streams genericclioptions.IOStreams) error {
 	config, err := configFlags.ToRESTConfig()
 	if err != nil {
 		return fmt.Errorf("failed to build Kubernetes client config: %w", err)
@@ -229,69 +235,82 @@ func runAllocations(ctx context.Context, configFlags *genericclioptions.ConfigFl
 	utils.SortResults(results, sortBy)
 	klog.V(4).InfoS("Results sorted", "sortBy", sortBy)
 
-	table := tablewriter.NewWriter(streams.Out) // Changed to NewTable
-	headerSlice := []string{"NODE", "CPU", "CPU REQ", "CPU%", "MEMORY", "MEM REQ", "MEM%"}
-	if showFree {
-		headerSlice = append(headerSlice, "FREE CPU", "FREE MEMORY")
-	}
-	if showHostPorts {
-		headerSlice = append(headerSlice, "HOST PORTS")
-	}
-	table.SetHeader(headerSlice) // Pass slice directly
-	setKubectlTableStyle(table)
-
-	for _, res := range results {
-		allocCPU := res.Node.Status.Allocatable.Cpu()
-		allocMem := res.Node.Status.Allocatable.Memory()
-
-		cpuColor := ui.PercentFontColor(res.CPUPercent)
-		memColor := ui.PercentFontColor(res.MemPercent)
-
-		rowValues := []string{
-			res.Node.Name,
-			utils.FormatCPU(*allocCPU),
-			utils.FormatCPU(res.ReqCPU),
-			fmt.Sprintf("%s%.1f%%%s", cpuColor, res.CPUPercent, ui.ColorReset),
-			utils.FormatMemory(allocMem.Value()),
-			utils.FormatMemory(res.ReqMem.Value()),
-			fmt.Sprintf("%s%.1f%%%s", memColor, res.MemPercent, ui.ColorReset),
+	if jsonOutputFlag {
+		// JSON Output Path
+		jsonData, err := output.GetJSONOutput(results, output.CmdTypeAllocation, showFree, showHostPorts, summaryOpt,
+			func(r []utils.NodeResult, shp bool, cType string) (*output.JSONSummary, error) {
+				// cType here will be output.CmdTypeAllocation, passed by GetJSONOutput
+				return summary.GetNodeResourceSummaryData(r, shp, cType)
+			})
+		if err != nil {
+			return fmt.Errorf("failed to prepare JSON data for allocation: %w", err)
 		}
-
+		if err := output.PrintJSON(jsonData, streams); err != nil {
+			return fmt.Errorf("failed to print JSON output for allocation: %w", err)
+		}
+	} else {
+		// Table Output Path
+		table := tablewriter.NewWriter(streams.Out)
+		headerSlice := []string{"NODE", "CPU", "CPU REQ", "CPU%", "MEMORY", "MEM REQ", "MEM%"}
 		if showFree {
-			freeCPUColor := ui.PercentBackgroundColor(res.CPUPercent)
-			freeMemColor := ui.PercentBackgroundColor(res.MemPercent)
-			rowValues = append(rowValues,
-				fmt.Sprintf("%s%s%s", freeCPUColor, utils.FormatCPU(res.FreeCPU), ui.ColorReset),
-				fmt.Sprintf("%s%s%s", freeMemColor, utils.FormatMemory(res.FreeMem.Value()), ui.ColorReset),
-			)
+			headerSlice = append(headerSlice, "FREE CPU", "FREE MEMORY")
 		}
-
 		if showHostPorts {
-			portStrings := make([]string, len(res.HostPorts))
-			for i, port := range res.HostPorts {
-				portStrings[i] = strconv.Itoa(int(port))
-			}
-			if len(portStrings) == 0 {
-				rowValues = append(rowValues, "-")
-			} else {
-				rowValues = append(rowValues, strings.Join(portStrings, ","))
-			}
+			headerSlice = append(headerSlice, "HOST PORTS")
 		}
-		table.Append(rowValues)
+		table.SetHeader(headerSlice)
+		setKubectlTableStyle(table)
+
+		for _, res := range results {
+			allocCPU := res.Node.Status.Allocatable.Cpu()
+			allocMem := res.Node.Status.Allocatable.Memory()
+
+			cpuColor := ui.PercentFontColor(res.CPUPercent)
+			memColor := ui.PercentFontColor(res.MemPercent)
+
+			rowValues := []string{
+				res.Node.Name,
+				utils.FormatCPU(*allocCPU),
+				utils.FormatCPU(res.ReqCPU),
+				fmt.Sprintf("%s%.1f%%%s", cpuColor, res.CPUPercent, ui.ColorReset),
+				utils.FormatMemory(allocMem.Value()),
+				utils.FormatMemory(res.ReqMem.Value()),
+				fmt.Sprintf("%s%.1f%%%s", memColor, res.MemPercent, ui.ColorReset),
+			}
+
+			if showFree {
+				freeCPUColor := ui.PercentBackgroundColor(res.CPUPercent)
+				freeMemColor := ui.PercentBackgroundColor(res.MemPercent)
+				rowValues = append(rowValues,
+					fmt.Sprintf("%s%s%s", freeCPUColor, utils.FormatCPU(res.FreeCPU), ui.ColorReset),
+					fmt.Sprintf("%s%s%s", freeMemColor, utils.FormatMemory(res.FreeMem.Value()), ui.ColorReset),
+				)
+			}
+
+			if showHostPorts {
+				portStrings := make([]string, len(res.HostPorts))
+				for i, port := range res.HostPorts {
+					portStrings[i] = strconv.Itoa(int(port))
+				}
+				if len(portStrings) == 0 {
+					rowValues = append(rowValues, "-")
+				} else {
+					rowValues = append(rowValues, strings.Join(portStrings, ","))
+				}
+			}
+			table.Append(rowValues)
+		}
+
+		if summaryOpt != utils.SummaryOnly {
+			table.Render()
+		}
+
+		if summaryOpt == utils.SummaryShow || summaryOpt == utils.SummaryOnly {
+			summary.PrintNodeResourceSummary(results, showHostPorts, streams.Out, "allocation") // Added type
+		}
 	}
 
-	if summaryOpt != utils.SummaryOnly {
-		table.Render()
-	}
-
-	// Call PrintAllocationSummary from pkg/summary
-	// Ensure streams.Out is passed, which implements io.Writer
-	if summaryOpt == utils.SummaryShow || summaryOpt == utils.SummaryOnly {
-		// TODO: Update PrintAllocationSummary if it needs to be aware of showFree for total calculations
-		summary.PrintAllocationSummary(results, showHostPorts, streams.Out)
-	}
-
-	klog.V(4).InfoS("Allocations command finished successfully")
+	klog.V(4).InfoS("Allocation command finished successfully")
 	return nil
 }
 

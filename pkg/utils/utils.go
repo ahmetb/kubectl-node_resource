@@ -1,4 +1,4 @@
-// Package utils provides shared utility types and functions for the kubectl-node-resources plugin.
+// Package utils provides shared utility types and functions for the kubectl node-resource plugin.
 package utils
 
 import (
