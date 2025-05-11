@@ -70,8 +70,8 @@ type JSONSummary struct {
 	AverageEphemeralPercent       float64                `json:"averageEphemeralPercent,omitempty"`
 	CPUPercentiles                []JSONPercentileDetail `json:"cpuPercentiles,omitempty"`    // Keeping existing percentile fields
 	MemoryPercentiles             []JSONPercentileDetail `json:"memoryPercentiles,omitempty"` // Keeping existing percentile fields
-	// TODO: Consider adding EphemeralStoragePercentiles if needed later
-	TopHostPorts []JSONHostPortSummary `json:"topHostPorts,omitempty"` // For allocation summary
+	EphemeralStoragePercentiles   []JSONPercentileDetail `json:"ephemeralStoragePercentiles,omitempty"`
+	TopHostPorts                  []JSONHostPortSummary  `json:"topHostPorts,omitempty"` // For allocation summary
 }
 
 // JSONOutput is the root structure for the JSON output.

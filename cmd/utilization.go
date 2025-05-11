@@ -30,6 +30,7 @@ import (
 	metricsv "k8s.io/metrics/pkg/apis/metrics/v1beta1"
 	metricsclient "k8s.io/metrics/pkg/client/clientset/versioned"
 
+	"kubectl-node_resources/pkg/options" // Changed
 	"kubectl-node_resources/pkg/output"
 	"kubectl-node_resources/pkg/summary"
 	"kubectl-node_resources/pkg/ui"
@@ -41,10 +42,10 @@ func newUtilizationCmd(streams genericclioptions.IOStreams) *cobra.Command {
 	opts := genericclioptions.NewConfigFlags(true)
 	var (
 		sortBy     string
-		showFree   bool
 		summaryOpt string
-		jsonOutput bool
+		// display options are now in a struct
 	)
+	displayOpts := options.DisplayOptions{} // Initialize the struct from pkg/options
 
 	cmd := &cobra.Command{
 		Use:   "utilization [node-selector]",
@@ -72,25 +73,28 @@ Kubernetes metrics-server to be installed and running in the cluster.`,
 			if len(args) > 0 {
 				selector = args[0]
 			}
-			klog.V(4).InfoS("Starting utilization command", "selector", selector, "sortBy", sortBy, "showFree", showFree, "summary", summaryOpt, "json", jsonOutput)
+			klog.V(4).InfoS("Starting utilization command", "selector", selector, "sortBy", sortBy,
+				"showCPU", displayOpts.ShowCPU, "showMemory", displayOpts.ShowMemory,
+				"showFree", displayOpts.ShowFree, "summary", summaryOpt, "json", displayOpts.JSONOutput)
 
 			runOpts := utilizationRunOptions{
 				configFlags:  opts,
 				streams:      streams,
 				nodeSelector: selector,
 				sortBy:       sortBy,
-				showFree:     showFree,
 				summaryOpt:   summaryOpt,
-				jsonOutput:   jsonOutput,
+				displayOpts:  displayOpts,
 			}
 			return runUtilization(cmd.Context(), runOpts)
 		},
 	}
 
-	cmd.Flags().StringVar(&sortBy, "sort-by", utils.SortByCPUPercent, fmt.Sprintf("Sort nodes by: %s, %s, or %s", utils.SortByCPUPercent, utils.SortByMemoryPercent, utils.SortByNodeName)) // Reverted: Removed EphemeralStorage sort option from help
-	cmd.Flags().BoolVar(&showFree, "show-free", false, "Show free CPU and Memory on each node")
+	cmd.Flags().StringVar(&sortBy, "sort-by", utils.SortByCPUPercent, fmt.Sprintf("Sort nodes by: %s, %s, or %s", utils.SortByCPUPercent, utils.SortByMemoryPercent, utils.SortByNodeName))
+	cmd.Flags().BoolVar(&displayOpts.ShowCPU, "show-cpu", true, "Show CPU utilization")
+	cmd.Flags().BoolVar(&displayOpts.ShowMemory, "show-memory", true, "Show memory utilization")
+	cmd.Flags().BoolVar(&displayOpts.ShowFree, "show-free", false, "Show free CPU and Memory on each node")
 	cmd.Flags().StringVar(&summaryOpt, "summary", utils.SummaryShow, fmt.Sprintf("Summary display option: %s, %s, or %s", utils.SummaryShow, utils.SummaryOnly, utils.SummaryHide))
-	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
+	cmd.Flags().BoolVar(&displayOpts.JSONOutput, "json", false, "Output in JSON format")
 	opts.AddFlags(cmd.Flags())
 	return cmd
 }
@@ -100,9 +104,8 @@ type utilizationRunOptions struct {
 	streams      genericclioptions.IOStreams
 	nodeSelector string
 	sortBy       string
-	showFree     bool
 	summaryOpt   string
-	jsonOutput   bool
+	displayOpts  options.DisplayOptions // Use options.DisplayOptions
 }
 
 // runUtilization executes the core logic for the utilization command.
@@ -193,11 +196,19 @@ func runUtilization(ctx context.Context, opts utilizationRunOptions) error {
 	utils.SortResults(results, opts.sortBy)
 	klog.V(4).InfoS("Utilization results sorted", "sortBy", opts.sortBy)
 
-	if opts.jsonOutput {
+	// Check if there's anything to display before proceeding
+	// For utilization, ShowHostPorts and ShowEphemeralStorage are implicitly false in DisplayOpts.
+	if !opts.displayOpts.JSONOutput && opts.summaryOpt == utils.SummaryHide && !opts.displayOpts.HasPrimaryDataColumns() {
+		fmt.Fprintln(opts.streams.ErrOut, "Error: No data selected for display. Please enable at least one of --show-cpu, --show-memory, or ensure summary is not hidden, or use --json.")
+		return fmt.Errorf("no data selected for display")
+	}
+
+	if opts.displayOpts.JSONOutput {
 		// JSON Output Path
-		jsonData, err := output.GetJSONOutput(results, utils.CmdTypeUtilization, opts.showFree, false /*showHostPorts*/, false /*showEphemeralStorage*/, opts.summaryOpt,
-			func(r []utils.NodeResult, shp bool, ses bool, cType utils.CmdType) (*output.JSONSummary, error) {
-				return summary.GetNodeResourceSummaryData(r, shp, ses, cType)
+		jsonData, err := output.GetJSONOutput(results, utils.CmdTypeUtilization, opts.displayOpts, opts.summaryOpt,
+			func(r []utils.NodeResult, currentDisplayOpts options.DisplayOptions, cType utils.CmdType) (*output.JSONSummary, error) {
+				// For utilization, ShowHostPorts and ShowEphemeralStorage will be false in currentDisplayOpts if not set by flags (which they aren't for this cmd).
+				return summary.GetNodeResourceSummaryData(r, currentDisplayOpts, cType)
 			})
 		if err != nil {
 			return fmt.Errorf("failed to prepare JSON data for utilization: %w", err)
@@ -208,11 +219,27 @@ func runUtilization(ctx context.Context, opts utilizationRunOptions) error {
 		klog.V(4).InfoS("JSON output printed successfully")
 		return nil
 	}
+
 	// Table Output Path
 	table := tablewriter.NewWriter(opts.streams.Out)
-	headerVals := []string{"NODE", "CPU", "CPU USED", "CPU%", "MEMORY", "MEM USED", "MEM%"}
-	if opts.showFree {
-		headerVals = append(headerVals, "FREE CPU", "FREE MEMORY")
+	var headerVals []string
+	headerVals = append(headerVals, "NODE")
+
+	if opts.displayOpts.ShowCPU {
+		headerVals = append(headerVals, "CPU", "CPU USED", "CPU%")
+	}
+	if opts.displayOpts.ShowMemory {
+		headerVals = append(headerVals, "MEMORY", "MEM USED", "MEM%")
+	}
+	// Ephemeral storage and host ports are not shown for utilization
+
+	if opts.displayOpts.ShowFree {
+		if opts.displayOpts.ShowCPU {
+			headerVals = append(headerVals, "FREE CPU")
+		}
+		if opts.displayOpts.ShowMemory {
+			headerVals = append(headerVals, "FREE MEMORY")
+		}
 	}
 	table.SetHeader(headerVals)
 	setKubectlTableStyle(table)
@@ -224,34 +251,51 @@ func runUtilization(ctx context.Context, opts utilizationRunOptions) error {
 		cpuColor := ui.PercentFontColor(res.CPUPercent)
 		memColor := ui.PercentFontColor(res.MemPercent)
 
-		rowValues := []string{
-			res.Node.Name,
-			utils.FormatCPU(*allocCPU),
-			utils.FormatCPU(res.ReqCPU), // Actual used CPU
-			fmt.Sprintf("%s%.1f%%%s", cpuColor, res.CPUPercent, ui.ColorReset),
-			utils.FormatMemory(allocMem.Value()),
-			utils.FormatMemory(res.ReqMem.Value()), // Actual used Memory
-			fmt.Sprintf("%s%.1f%%%s", memColor, res.MemPercent, ui.ColorReset),
+		var rowValues []string
+		rowValues = append(rowValues, res.Node.Name)
+
+		if opts.displayOpts.ShowCPU {
+			rowValues = append(rowValues,
+				utils.FormatCPU(*allocCPU),
+				utils.FormatCPU(res.ReqCPU), // Actual used CPU
+				fmt.Sprintf("%s%.1f%%%s", cpuColor, res.CPUPercent, ui.ColorReset),
+			)
+		}
+		if opts.displayOpts.ShowMemory {
+			rowValues = append(rowValues,
+				utils.FormatMemory(allocMem.Value()),
+				utils.FormatMemory(res.ReqMem.Value()), // Actual used Memory
+				fmt.Sprintf("%s%.1f%%%s", memColor, res.MemPercent, ui.ColorReset),
+			)
 		}
 
-		if opts.showFree {
-			freeCPUColor := ui.PercentBackgroundColor(res.CPUPercent)
-			freeMemColor := ui.PercentBackgroundColor(res.MemPercent)
-			rowValues = append(rowValues,
-				fmt.Sprintf("%s%s%s", freeCPUColor, utils.FormatCPU(res.FreeCPU), ui.ColorReset),
-				fmt.Sprintf("%s%s%s", freeMemColor, utils.FormatMemory(res.FreeMem.Value()), ui.ColorReset),
-			)
+		if opts.displayOpts.ShowFree {
+			if opts.displayOpts.ShowCPU {
+				freeCPUColor := ui.PercentBackgroundColor(res.CPUPercent)
+				rowValues = append(rowValues,
+					fmt.Sprintf("%s%s%s", freeCPUColor, utils.FormatCPU(res.FreeCPU), ui.ColorReset),
+				)
+			}
+			if opts.displayOpts.ShowMemory {
+				freeMemColor := ui.PercentBackgroundColor(res.MemPercent)
+				rowValues = append(rowValues,
+					fmt.Sprintf("%s%s%s", freeMemColor, utils.FormatMemory(res.FreeMem.Value()), ui.ColorReset),
+				)
+			}
 		}
 		table.Append(rowValues)
 	}
 
 	if opts.summaryOpt != utils.SummaryOnly {
-		table.Render()
+		if len(headerVals) > 1 { // Only render if there are columns to show (besides NODE)
+			table.Render()
+		} else if !opts.displayOpts.JSONOutput && opts.summaryOpt == utils.SummaryHide {
+			fmt.Fprintln(opts.streams.Out, "No data to display with current flags.")
+		}
 	}
 
 	if opts.summaryOpt == utils.SummaryShow || opts.summaryOpt == utils.SummaryOnly {
-		// Pass false for showEphemeralStorage for utilization command
-		summary.PrintNodeResourceSummary(results, false /*showHostPorts*/, false /*showEphemeralStorage*/, opts.streams.Out, utils.CmdTypeUtilization)
+		summary.PrintNodeResourceSummary(results, opts.displayOpts, opts.streams.Out, utils.CmdTypeUtilization)
 	}
 
 	klog.V(4).InfoS("Utilization command finished successfully")

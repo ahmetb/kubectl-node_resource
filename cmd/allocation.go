@@ -32,6 +32,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 
+	"kubectl-node_resources/pkg/options" // Changed
 	"kubectl-node_resources/pkg/output"
 	"kubectl-node_resources/pkg/summary"
 	"kubectl-node_resources/pkg/ui"
@@ -42,13 +43,11 @@ import (
 func newAllocationCmd(streams genericclioptions.IOStreams) *cobra.Command {
 	opts := genericclioptions.NewConfigFlags(true)
 	var (
-		sortBy               string
-		showHostPorts        bool
-		showFree             bool
-		showEphemeralStorage bool
-		summaryOpt           string
-		jsonOutput           bool
+		sortBy     string
+		summaryOpt string
+		// display options are now in a struct
 	)
+	displayOpts := options.DisplayOptions{} // Initialize the struct from pkg/options
 
 	cmd := &cobra.Command{
 		Use:   "allocation [node-selector]",
@@ -82,43 +81,43 @@ Nodes can be filtered by a label selector.`,
 			if len(args) > 0 {
 				selector = args[0]
 			}
-			klog.V(4).InfoS("Starting allocation command", "selector", selector, "sortBy", sortBy, "showHostPorts", showHostPorts, "showFree", showFree, "summary", summaryOpt, "json", jsonOutput)
+			klog.V(4).InfoS("Starting allocation command", "selector", selector, "sortBy", sortBy,
+				"showCPU", displayOpts.ShowCPU, "showMemory", displayOpts.ShowMemory,
+				"showHostPorts", displayOpts.ShowHostPorts, "showFree", displayOpts.ShowFree,
+				"showEphemeralStorage", displayOpts.ShowEphemeralStorage,
+				"summary", summaryOpt, "json", displayOpts.JSONOutput)
 
 			runOpts := allocationRunOptions{
-				configFlags:          opts,
-				streams:              streams,
-				nodeSelector:         selector,
-				sortBy:               sortBy,
-				showHostPorts:        showHostPorts,
-				showFree:             showFree,
-				summaryOpt:           summaryOpt,
-				jsonOutput:           jsonOutput,
-				showEphemeralStorage: showEphemeralStorage,
+				configFlags:  opts,
+				streams:      streams,
+				nodeSelector: selector,
+				sortBy:       sortBy,
+				summaryOpt:   summaryOpt,
+				DisplayOpts:  displayOpts,
 			}
 			return runAllocation(cmd.Context(), runOpts)
 		},
 	}
 
 	cmd.Flags().StringVar(&sortBy, "sort-by", utils.SortByCPUPercent, fmt.Sprintf("Sort nodes by: %s, %s, %s, or %s", utils.SortByCPUPercent, utils.SortByMemoryPercent, utils.SortByNodeName, utils.SortByEphemeralStoragePercent))
-	cmd.Flags().BoolVar(&showHostPorts, "show-host-ports", false, "Show host ports used by containers on each node")
-	cmd.Flags().BoolVar(&showEphemeralStorage, "show-ephemeral-storage", false, "Show ephemeral storage allocation/utilization")
-	cmd.Flags().BoolVar(&showFree, "show-free", false, "Show free CPU and Memory on each node")
+	cmd.Flags().BoolVar(&displayOpts.ShowCPU, "show-cpu", true, "Show CPU allocation/utilization")
+	cmd.Flags().BoolVar(&displayOpts.ShowMemory, "show-memory", true, "Show memory allocation/utilization")
+	cmd.Flags().BoolVar(&displayOpts.ShowHostPorts, "show-host-ports", false, "Show host ports used by containers on each node")
+	cmd.Flags().BoolVar(&displayOpts.ShowEphemeralStorage, "show-ephemeral-storage", false, "Show ephemeral storage allocation/utilization")
+	cmd.Flags().BoolVar(&displayOpts.ShowFree, "show-free", false, "Show free CPU and Memory on each node")
 	cmd.Flags().StringVar(&summaryOpt, "summary", utils.SummaryShow, fmt.Sprintf("Summary display option: %s, %s, or %s", utils.SummaryShow, utils.SummaryOnly, utils.SummaryHide))
-	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
+	cmd.Flags().BoolVar(&displayOpts.JSONOutput, "json", false, "Output in JSON format")
 	opts.AddFlags(cmd.Flags())
 	return cmd
 }
 
 type allocationRunOptions struct {
-	configFlags          *genericclioptions.ConfigFlags
-	streams              genericclioptions.IOStreams
-	nodeSelector         string
-	sortBy               string
-	showHostPorts        bool
-	showFree             bool
-	summaryOpt           string
-	jsonOutput           bool
-	showEphemeralStorage bool
+	configFlags  *genericclioptions.ConfigFlags
+	streams      genericclioptions.IOStreams
+	nodeSelector string
+	sortBy       string
+	summaryOpt   string
+	DisplayOpts  options.DisplayOptions // Use options.DisplayOptions
 }
 
 // runAllocation executes the core logic for the allocation command.
@@ -182,19 +181,18 @@ func runAllocation(ctx context.Context, opts allocationRunOptions) error {
 				totalCPU.Add(podCPU)
 				totalMem.Add(podMem)
 				totalEphemeralStorage.Add(podEphemeralStorage)
-				if opts.showHostPorts {
-					for _, container := range pod.Spec.Containers {
-						for _, port := range container.Ports {
-							if port.HostPort > 0 {
-								hostPortsMap[port.HostPort] = struct{}{}
-							}
+				// Always calculate host ports
+				for _, container := range pod.Spec.Containers {
+					for _, port := range container.Ports {
+						if port.HostPort > 0 {
+							hostPortsMap[port.HostPort] = struct{}{}
 						}
 					}
-					for _, container := range pod.Spec.InitContainers { // Also check initContainers
-						for _, port := range container.Ports {
-							if port.HostPort > 0 {
-								hostPortsMap[port.HostPort] = struct{}{}
-							}
+				}
+				for _, container := range pod.Spec.InitContainers { // Also check initContainers
+					for _, port := range container.Ports {
+						if port.HostPort > 0 {
+							hostPortsMap[port.HostPort] = struct{}{}
 						}
 					}
 				}
@@ -226,7 +224,7 @@ func runAllocation(ctx context.Context, opts allocationRunOptions) error {
 			}
 
 			var currentHostPorts []int32
-			if opts.showHostPorts {
+			if opts.DisplayOpts.ShowHostPorts {
 				for port := range hostPortsMap {
 					currentHostPorts = append(currentHostPorts, port)
 				}
@@ -275,12 +273,18 @@ func runAllocation(ctx context.Context, opts allocationRunOptions) error {
 	utils.SortResults(results, opts.sortBy)
 	klog.V(4).InfoS("Results sorted", "sortBy", opts.sortBy)
 
-	if opts.jsonOutput {
+	// Check if there's anything useful to display before proceeding
+	if !opts.DisplayOpts.JSONOutput && !opts.DisplayOpts.HasPrimaryDataColumns() {
+		fmt.Fprintln(opts.streams.ErrOut, "Error: No data columns selected for display. Please enable at least one of --show-cpu, --show-memory, --show-ephemeral-storage, --show-host-ports to display table data or generate a meaningful summary.")
+		return fmt.Errorf("no data columns selected for display")
+	}
+
+	if opts.DisplayOpts.JSONOutput {
 		// JSON Output Path
-		jsonData, err := output.GetJSONOutput(results, utils.CmdTypeAllocation, opts.showFree, opts.showHostPorts, opts.showEphemeralStorage, opts.summaryOpt,
-			func(r []utils.NodeResult, shp bool, ses bool, cType utils.CmdType) (*output.JSONSummary, error) { // Changed cType to utils.CmdType
+		jsonData, err := output.GetJSONOutput(results, utils.CmdTypeAllocation, opts.DisplayOpts, opts.summaryOpt,
+			func(r []utils.NodeResult, currentDisplayOpts options.DisplayOptions, cType utils.CmdType) (*output.JSONSummary, error) {
 				// cType here will be utils.CmdTypeAllocation, passed by GetJSONOutput
-				return summary.GetNodeResourceSummaryData(r, shp, ses, cType)
+				return summary.GetNodeResourceSummaryData(r, currentDisplayOpts, cType)
 			})
 		if err != nil {
 			return fmt.Errorf("failed to prepare JSON data for allocation: %w", err)
@@ -291,19 +295,33 @@ func runAllocation(ctx context.Context, opts allocationRunOptions) error {
 		klog.V(4).InfoS("JSON output printed successfully")
 		return nil
 	}
+
 	// Table Output Path
 	table := tablewriter.NewWriter(opts.streams.Out)
-	headerSlice := []string{"NODE", "CPU", "CPU REQ", "CPU%", "MEMORY", "MEM REQ", "MEM%"}
-	if opts.showEphemeralStorage {
+	var headerSlice []string
+	headerSlice = append(headerSlice, "NODE")
+
+	if opts.DisplayOpts.ShowCPU {
+		headerSlice = append(headerSlice, "CPU", "CPU REQ", "CPU%")
+	}
+	if opts.DisplayOpts.ShowMemory {
+		headerSlice = append(headerSlice, "MEMORY", "MEM REQ", "MEM%")
+	}
+	if opts.DisplayOpts.ShowEphemeralStorage {
 		headerSlice = append(headerSlice, "EPHEMERAL", "EPH REQ", "EPH%")
 	}
-	if opts.showFree {
-		headerSlice = append(headerSlice, "FREE CPU", "FREE MEMORY")
-		if opts.showEphemeralStorage {
+	if opts.DisplayOpts.ShowFree {
+		if opts.DisplayOpts.ShowCPU {
+			headerSlice = append(headerSlice, "FREE CPU")
+		}
+		if opts.DisplayOpts.ShowMemory {
+			headerSlice = append(headerSlice, "FREE MEMORY")
+		}
+		if opts.DisplayOpts.ShowEphemeralStorage { // Assuming FREE EPH only makes sense if EPH is shown
 			headerSlice = append(headerSlice, "FREE EPH")
 		}
 	}
-	if opts.showHostPorts {
+	if opts.DisplayOpts.ShowHostPorts {
 		headerSlice = append(headerSlice, "HOST PORTS")
 	}
 	table.SetHeader(headerSlice)
@@ -318,18 +336,25 @@ func runAllocation(ctx context.Context, opts allocationRunOptions) error {
 		memColor := ui.PercentFontColor(res.MemPercent)
 		ephColor := ui.PercentFontColor(res.EphemeralStoragePercent)
 
-		rowValues := []string{
-			res.Node.Name,
-			utils.FormatCPU(*allocCPU),
-			utils.FormatCPU(res.ReqCPU),
-			fmt.Sprintf("%s%.1f%%%s", cpuColor, res.CPUPercent, ui.ColorReset),
-			utils.FormatMemory(allocMem.Value()),
-			utils.FormatMemory(res.ReqMem.Value()),
-			fmt.Sprintf("%s%.1f%%%s", memColor, res.MemPercent, ui.ColorReset),
+		var rowValues []string
+		rowValues = append(rowValues, res.Node.Name)
+
+		if opts.DisplayOpts.ShowCPU {
+			rowValues = append(rowValues,
+				utils.FormatCPU(*allocCPU),
+				utils.FormatCPU(res.ReqCPU),
+				fmt.Sprintf("%s%.1f%%%s", cpuColor, res.CPUPercent, ui.ColorReset),
+			)
+		}
+		if opts.DisplayOpts.ShowMemory {
+			rowValues = append(rowValues,
+				utils.FormatMemory(allocMem.Value()),
+				utils.FormatMemory(res.ReqMem.Value()),
+				fmt.Sprintf("%s%.1f%%%s", memColor, res.MemPercent, ui.ColorReset),
+			)
 		}
 
-		if opts.showEphemeralStorage {
-			// Assuming utils.FormatMemory can be used for ephemeral storage as it's also bytes
+		if opts.DisplayOpts.ShowEphemeralStorage {
 			rowValues = append(rowValues,
 				utils.FormatMemory(res.AllocEphemeralStorage.Value()),
 				utils.FormatMemory(res.ReqEphemeralStorage.Value()),
@@ -337,23 +362,28 @@ func runAllocation(ctx context.Context, opts allocationRunOptions) error {
 			)
 		}
 
-		if opts.showFree {
-			freeCPUColor := ui.PercentBackgroundColor(res.CPUPercent)
-			freeMemColor := ui.PercentBackgroundColor(res.MemPercent)
-			rowValues = append(rowValues,
-				fmt.Sprintf("%s%s%s", freeCPUColor, utils.FormatCPU(res.FreeCPU), ui.ColorReset),
-				fmt.Sprintf("%s%s%s", freeMemColor, utils.FormatMemory(res.FreeMem.Value()), ui.ColorReset),
-			)
-			if opts.showEphemeralStorage {
-				freeEphColor := ui.PercentBackgroundColor(res.EphemeralStoragePercent)
-				// Assuming utils.FormatMemory can be used for ephemeral storage
+		if opts.DisplayOpts.ShowFree {
+			if opts.DisplayOpts.ShowCPU {
+				freeCPUColor := ui.PercentBackgroundColor(res.CPUPercent) // Color based on usage
+				rowValues = append(rowValues,
+					fmt.Sprintf("%s%s%s", freeCPUColor, utils.FormatCPU(res.FreeCPU), ui.ColorReset),
+				)
+			}
+			if opts.DisplayOpts.ShowMemory {
+				freeMemColor := ui.PercentBackgroundColor(res.MemPercent) // Color based on usage
+				rowValues = append(rowValues,
+					fmt.Sprintf("%s%s%s", freeMemColor, utils.FormatMemory(res.FreeMem.Value()), ui.ColorReset),
+				)
+			}
+			if opts.DisplayOpts.ShowEphemeralStorage { // Assuming FREE EPH only makes sense if EPH is shown
+				freeEphColor := ui.PercentBackgroundColor(res.EphemeralStoragePercent) // Color based on usage
 				rowValues = append(rowValues,
 					fmt.Sprintf("%s%s%s", freeEphColor, utils.FormatMemory(res.FreeEphemeralStorage.Value()), ui.ColorReset),
 				)
 			}
 		}
 
-		if opts.showHostPorts {
+		if opts.DisplayOpts.ShowHostPorts {
 			portStrings := make([]string, len(res.HostPorts))
 			for i, port := range res.HostPorts {
 				portStrings[i] = strconv.Itoa(int(port))
@@ -368,11 +398,19 @@ func runAllocation(ctx context.Context, opts allocationRunOptions) error {
 	}
 
 	if opts.summaryOpt != utils.SummaryOnly {
-		table.Render()
+		// Only render if there are columns to show (besides NODE)
+		// This check is now complemented by the more comprehensive one at the beginning of output generation.
+		if len(headerSlice) > 1 {
+			table.Render()
+		} else if !opts.DisplayOpts.JSONOutput && opts.summaryOpt == utils.SummaryHide {
+			// This case should ideally be caught by the earlier check,
+			// but as a fallback, print a message if table would be empty and no other output is planned.
+			fmt.Fprintln(opts.streams.Out, "No data to display with current flags.")
+		}
 	}
 
 	if opts.summaryOpt == utils.SummaryShow || opts.summaryOpt == utils.SummaryOnly {
-		summary.PrintNodeResourceSummary(results, opts.showHostPorts, opts.showEphemeralStorage, opts.streams.Out, utils.CmdTypeAllocation) // Changed to utils.CmdTypeAllocation
+		summary.PrintNodeResourceSummary(results, opts.DisplayOpts, opts.streams.Out, utils.CmdTypeAllocation)
 	}
 
 	klog.V(4).InfoS("Allocation command finished successfully")

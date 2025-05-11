@@ -59,6 +59,10 @@ resource pressure on each node.
   the free resources (`--show-free`) on each node.
 - **Host Port Display**: Displays host ports used by containers on nodes
   (`--show-host-ports`).
+- **Selective Resource Display**: Allows users to choose which resources (CPU,
+  Memory, Ephemeral Storage, Host Ports) are displayed in the output using flags
+  like `--show-cpu`, `--show-memory`, `--show-ephemeral-storage`, and
+  `--show-host-ports`.
 
 ## Usage
 
@@ -109,6 +113,23 @@ resources requested.
     </tr>
   </tbody>
 </table>
+
+#### Resource Display Flags
+
+Both `allocation` and `utilization` commands support flags to control which resource details are displayed:
+
+- `--show-cpu`: (Default: `true`) Show CPU related information (allocatable, requested/used, percentage).
+- `--show-memory`: (Default: `true`) Show Memory related information (allocatable, requested/used, percentage).
+
+The `allocation` command additionally supports:
+
+- `--show-host-ports`: (Default: `false`) Show host ports used by containers on each node.
+- `--show-ephemeral-storage`: (Default: `false`) Show ephemeral storage allocation details.
+
+These flags allow you to tailor the output to focus on the specific resources you are interested in. For example, to see only memory and ephemeral storage for allocations:
+```bash
+kubectl node-resource allocation --show-cpu=false --show-memory --show-ephemeral-storage
+```
 
 ### `utilization` subcommand
 

@@ -17,7 +17,8 @@ package output
 import (
 	"encoding/json"
 	"fmt"
-	"kubectl-node_resources/pkg/utils" // For NodeResult and formatting functions
+	"kubectl-node_resources/pkg/options" // Changed
+	"kubectl-node_resources/pkg/utils"   // For NodeResult and formatting functions
 
 	// For io.Writer, though genericclioptions.IOStreams is better
 	"k8s.io/cli-runtime/pkg/genericclioptions"
@@ -26,45 +27,65 @@ import (
 
 // ToJSONNode converts a utils.NodeResult to a JSONNode.
 // cmdType helps determine whether to populate Requested or Used fields.
-// showFree, showHostPorts, showEphemeralStorage flags control optional fields.
-func ToJSONNode(nodeRes utils.NodeResult, cmdType utils.CmdType, showFree bool, showHostPorts bool, showEphemeralStorage bool) JSONNode {
+// displayOpts control optional fields.
+func ToJSONNode(nodeRes utils.NodeResult, cmdType utils.CmdType, displayOpts options.DisplayOptions) JSONNode {
 	jsonNode := JSONNode{
-		Name:              nodeRes.Node.Name,
-		CPUAllocatable:    utils.FormatCPU(*nodeRes.Node.Status.Allocatable.Cpu()),
-		CPUPercent:        nodeRes.CPUPercent,
-		MemoryAllocatable: utils.FormatMemory(nodeRes.Node.Status.Allocatable.Memory().Value()),
-		MemoryPercent:     nodeRes.MemPercent,
+		Name: nodeRes.Node.Name,
+	}
+
+	if displayOpts.ShowCPU {
+		jsonNode.CPUAllocatable = utils.FormatCPU(*nodeRes.Node.Status.Allocatable.Cpu())
+		jsonNode.CPUPercent = nodeRes.CPUPercent
+	}
+	if displayOpts.ShowMemory {
+		jsonNode.MemoryAllocatable = utils.FormatMemory(nodeRes.Node.Status.Allocatable.Memory().Value())
+		jsonNode.MemoryPercent = nodeRes.MemPercent
 	}
 
 	if cmdType == utils.CmdTypeAllocation {
-		jsonNode.CPURequested = utils.FormatCPU(nodeRes.ReqCPU)
-		jsonNode.MemoryRequested = utils.FormatMemory(nodeRes.ReqMem.Value())
-		if showHostPorts {
+		if displayOpts.ShowCPU {
+			jsonNode.CPURequested = utils.FormatCPU(nodeRes.ReqCPU)
+		}
+		if displayOpts.ShowMemory {
+			jsonNode.MemoryRequested = utils.FormatMemory(nodeRes.ReqMem.Value())
+		}
+		if displayOpts.ShowHostPorts {
 			if nodeRes.HostPorts == nil {
 				jsonNode.HostPorts = []int32{}
 			} else {
 				jsonNode.HostPorts = nodeRes.HostPorts
 			}
 		}
-		if showEphemeralStorage {
+		if displayOpts.ShowEphemeralStorage {
 			jsonNode.EphemeralStorageAllocatable = utils.FormatMemory(nodeRes.AllocEphemeralStorage.Value())
 			jsonNode.EphemeralStorageRequested = utils.FormatMemory(nodeRes.ReqEphemeralStorage.Value())
 			jsonNode.EphemeralStoragePercent = nodeRes.EphemeralStoragePercent
 		}
 	} else if cmdType == utils.CmdTypeUtilization {
-		jsonNode.CPUUsed = utils.FormatCPU(nodeRes.ReqCPU)               // ReqCPU stores actual usage in utilization context
-		jsonNode.MemoryUsed = utils.FormatMemory(nodeRes.ReqMem.Value()) // ReqMem stores actual usage
-		if showEphemeralStorage {
+		if displayOpts.ShowCPU {
+			jsonNode.CPUUsed = utils.FormatCPU(nodeRes.ReqCPU) // ReqCPU stores actual usage in utilization context
+		}
+		if displayOpts.ShowMemory {
+			jsonNode.MemoryUsed = utils.FormatMemory(nodeRes.ReqMem.Value()) // ReqMem stores actual usage
+		}
+		// Note: Ephemeral storage utilization is not typically shown directly by 'kubectl top node'
+		// but if displayOpts.ShowEphemeralStorage is true, we can include it.
+		if displayOpts.ShowEphemeralStorage {
 			jsonNode.EphemeralStorageAllocatable = utils.FormatMemory(nodeRes.AllocEphemeralStorage.Value())
-			jsonNode.EphemeralStorageUsed = utils.FormatMemory(nodeRes.ReqEphemeralStorage.Value()) // ReqEphemeralStorage stores actual usage in util context
+			// Assuming ReqEphemeralStorage holds utilization data if available for utilization command
+			jsonNode.EphemeralStorageUsed = utils.FormatMemory(nodeRes.ReqEphemeralStorage.Value())
 			jsonNode.EphemeralStoragePercent = nodeRes.EphemeralStoragePercent
 		}
 	}
 
-	if showFree {
-		jsonNode.FreeCPU = utils.FormatCPU(nodeRes.FreeCPU)
-		jsonNode.FreeMemory = utils.FormatMemory(nodeRes.FreeMem.Value())
-		if showEphemeralStorage {
+	if displayOpts.ShowFree {
+		if displayOpts.ShowCPU {
+			jsonNode.FreeCPU = utils.FormatCPU(nodeRes.FreeCPU)
+		}
+		if displayOpts.ShowMemory {
+			jsonNode.FreeMemory = utils.FormatMemory(nodeRes.FreeMem.Value())
+		}
+		if displayOpts.ShowEphemeralStorage { // Assuming FreeEphemeralStorage only makes sense if EphemeralStorage is shown
 			jsonNode.FreeEphemeralStorage = utils.FormatMemory(nodeRes.FreeEphemeralStorage.Value())
 		}
 	}
@@ -84,15 +105,14 @@ func PrintJSON(data JSONOutput, streams genericclioptions.IOStreams) error {
 }
 
 // GetJSONOutput prepares the full JSONOutput structure.
-// It takes the list of results, command type, and various display options.
+// It takes the list of results, command type, and display options.
 func GetJSONOutput(
 	results []utils.NodeResult,
-	cmdType utils.CmdType, // Changed to utils.CmdType
-	showFree bool,
-	showHostPorts bool, // Only relevant for "allocations" command
-	showEphemeralStorage bool, // Added this flag
+	cmdType utils.CmdType,
+	displayOpts options.DisplayOptions, // Changed
 	summaryOpt string, // To decide if summary is needed
-	getSummaryFunc func([]utils.NodeResult, bool, bool, utils.CmdType) (*JSONSummary, error), // Function to get summary data, added showEphemeralStorage & changed cmdType
+	// The summary func will also need to be updated to accept options.DisplayOptions
+	getSummaryFunc func([]utils.NodeResult, options.DisplayOptions, utils.CmdType) (*JSONSummary, error),
 ) (JSONOutput, error) {
 	output := JSONOutput{}
 
@@ -100,7 +120,17 @@ func GetJSONOutput(
 	if summaryOpt != utils.SummaryOnly {
 		jsonNodes := make([]JSONNode, len(results))
 		for i, res := range results {
-			jsonNodes[i] = ToJSONNode(res, cmdType, showFree, showHostPorts && cmdType == utils.CmdTypeAllocation, showEphemeralStorage)
+			// Pass the full displayOpts to ToJSONNode.
+			// ToJSONNode will internally handle which fields are relevant based on cmdType if necessary,
+			// though for JSON, showing all requested fields if true is generally fine.
+			currentDisplayOpts := displayOpts
+			if cmdType == utils.CmdTypeUtilization {
+				// For utilization, hostPorts and ephemeralStorage might not be applicable from metrics-server
+				// However, if the flags were somehow true, ToJSONNode can handle it.
+				// We ensure that ToJSONNode correctly interprets these for utilization.
+				// The DisplayOptions struct itself doesn't change, ToJSONNode adapts.
+			}
+			jsonNodes[i] = ToJSONNode(res, cmdType, currentDisplayOpts)
 		}
 		output.Nodes = jsonNodes
 	}
@@ -108,7 +138,9 @@ func GetJSONOutput(
 	// Populate summary if not hidden
 	if summaryOpt != utils.SummaryHide {
 		if getSummaryFunc != nil {
-			summaryData, err := getSummaryFunc(results, showHostPorts && cmdType == utils.CmdTypeAllocation, showEphemeralStorage, cmdType)
+			// Pass displayOpts to the summary function.
+			// The summary function will need to be updated to accept cmd.DisplayOptions.
+			summaryData, err := getSummaryFunc(results, displayOpts, cmdType)
 			if err != nil {
 				return JSONOutput{}, fmt.Errorf("failed to get summary data for JSON output: %w", err)
 			}

@@ -22,6 +22,7 @@ import (
 	"sort"
 	"strings"
 
+	"kubectl-node_resources/pkg/options"     // Added for DisplayOptions
 	"kubectl-node_resources/pkg/output"      // Added for JSON types
 	"kubectl-node_resources/pkg/percentiles" // Added for percentile definitions
 	"kubectl-node_resources/pkg/ui"
@@ -157,16 +158,12 @@ func GetTopHostPortsData(results []utils.NodeResult) []output.JSONHostPortSummar
 }
 
 // GetNodeResourceSummaryData prepares the full summary data for a given command type.
-func GetNodeResourceSummaryData(results []utils.NodeResult, showHostPorts bool, showEphemeralStorage bool, cmdType utils.CmdType) (*output.JSONSummary, error) {
+func GetNodeResourceSummaryData(results []utils.NodeResult, displayOpts options.DisplayOptions, cmdType utils.CmdType) (*output.JSONSummary, error) {
 	if len(results) == 0 {
 		return nil, nil
 	}
 
 	var summaryContext string
-	var totalCPUAlloc, totalMemAlloc, totalEphAlloc float64
-	var totalCPUReqOrUsed, totalMemReqOrUsed, totalEphReqOrUsed float64
-	var sumCPUPercent, sumMemPercent, sumEphPercent float64
-
 	if cmdType == utils.CmdTypeAllocation {
 		summaryContext = "Allocation"
 	} else if cmdType == utils.CmdTypeUtilization {
@@ -175,52 +172,62 @@ func GetNodeResourceSummaryData(results []utils.NodeResult, showHostPorts bool, 
 		return nil, fmt.Errorf("unknown command type for summary: %s", cmdType)
 	}
 
-	for _, res := range results {
-		totalCPUAlloc += res.Node.Status.Allocatable.Cpu().AsApproximateFloat64()
-		totalMemAlloc += float64(res.Node.Status.Allocatable.Memory().Value())
-		totalCPUReqOrUsed += res.ReqCPU.AsApproximateFloat64()
-		totalMemReqOrUsed += float64(res.ReqMem.Value())
-		sumCPUPercent += res.CPUPercent
-		sumMemPercent += res.MemPercent
-		if showEphemeralStorage {
+	summary := &output.JSONSummary{
+		TotalNodes: len(results),
+	}
+
+	if displayOpts.ShowCPU {
+		var totalCPUAlloc, totalCPUReqOrUsed, sumCPUPercent float64
+		for _, res := range results {
+			totalCPUAlloc += res.Node.Status.Allocatable.Cpu().AsApproximateFloat64()
+			totalCPUReqOrUsed += res.ReqCPU.AsApproximateFloat64()
+			sumCPUPercent += res.CPUPercent
+		}
+		avgCPUPercent := 0.0
+		if len(results) > 0 {
+			avgCPUPercent = sumCPUPercent / float64(len(results))
+		}
+		summary.TotalCPUAllocatable = utils.FormatCPU(*resource.NewMilliQuantity(int64(totalCPUAlloc*1000), resource.DecimalSI))
+		summary.TotalCPURequestedOrUsed = utils.FormatCPU(*resource.NewMilliQuantity(int64(totalCPUReqOrUsed*1000), resource.DecimalSI))
+		summary.AverageCPUPercent = avgCPUPercent
+		summary.CPUPercentiles = GetResourcePercentilesData(results, "CPU", summaryContext, displayOpts.ShowEphemeralStorage) // Pass through showEphemeralStorage for consistency, though not used by CPU
+	}
+
+	if displayOpts.ShowMemory {
+		var totalMemAlloc, totalMemReqOrUsed, sumMemPercent float64
+		for _, res := range results {
+			totalMemAlloc += float64(res.Node.Status.Allocatable.Memory().Value())
+			totalMemReqOrUsed += float64(res.ReqMem.Value())
+			sumMemPercent += res.MemPercent
+		}
+		avgMemPercent := 0.0
+		if len(results) > 0 {
+			avgMemPercent = sumMemPercent / float64(len(results))
+		}
+		summary.TotalMemoryAllocatable = utils.FormatMemory(int64(totalMemAlloc))
+		summary.TotalMemoryRequestedOrUsed = utils.FormatMemory(int64(totalMemReqOrUsed))
+		summary.AverageMemoryPercent = avgMemPercent
+		summary.MemoryPercentiles = GetResourcePercentilesData(results, "Memory", summaryContext, displayOpts.ShowEphemeralStorage) // Pass through showEphemeralStorage for consistency, though not used by Memory
+	}
+
+	if displayOpts.ShowEphemeralStorage {
+		var totalEphAlloc, totalEphReqOrUsed, sumEphPercent float64
+		for _, res := range results {
 			totalEphAlloc += float64(res.AllocEphemeralStorage.Value())
 			totalEphReqOrUsed += float64(res.ReqEphemeralStorage.Value())
 			sumEphPercent += res.EphemeralStoragePercent
 		}
-	}
-
-	avgCPUPercent := 0.0
-	avgMemPercent := 0.0
-	avgEphPercent := 0.0
-	if len(results) > 0 {
-		avgCPUPercent = sumCPUPercent / float64(len(results))
-		avgMemPercent = sumMemPercent / float64(len(results))
-		if showEphemeralStorage {
+		avgEphPercent := 0.0
+		if len(results) > 0 {
 			avgEphPercent = sumEphPercent / float64(len(results))
 		}
-	}
-
-	// TODO: Update GetResourcePercentilesData to accept showEphemeralStorage and handle ephemeral storage percentiles
-	summary := &output.JSONSummary{
-		TotalNodes:                 len(results),
-		TotalCPUAllocatable:        utils.FormatCPU(*resource.NewMilliQuantity(int64(totalCPUAlloc*1000), resource.DecimalSI)),
-		TotalCPURequestedOrUsed:    utils.FormatCPU(*resource.NewMilliQuantity(int64(totalCPUReqOrUsed*1000), resource.DecimalSI)),
-		AverageCPUPercent:          avgCPUPercent,
-		TotalMemoryAllocatable:     utils.FormatMemory(int64(totalMemAlloc)),
-		TotalMemoryRequestedOrUsed: utils.FormatMemory(int64(totalMemReqOrUsed)),
-		AverageMemoryPercent:       avgMemPercent,
-		CPUPercentiles:             GetResourcePercentilesData(results, "CPU", summaryContext, showEphemeralStorage),
-		MemoryPercentiles:          GetResourcePercentilesData(results, "Memory", summaryContext, showEphemeralStorage),
-	}
-
-	if showEphemeralStorage {
 		summary.TotalEphemeralAllocatable = utils.FormatMemory(int64(totalEphAlloc))
 		summary.TotalEphemeralRequestedOrUsed = utils.FormatMemory(int64(totalEphReqOrUsed))
 		summary.AverageEphemeralPercent = avgEphPercent
-		// summary.EphemeralStoragePercentiles = GetResourcePercentilesData(results, "EphemeralStorage", summaryContext, showEphemeralStorage) // Add this if JSONSummary has EphemeralStoragePercentiles
+		summary.EphemeralStoragePercentiles = GetResourcePercentilesData(results, "EphemeralStorage", summaryContext, true) // Explicitly true as we are in the ShowEphemeralStorage block
 	}
 
-	if cmdType == utils.CmdTypeAllocation && showHostPorts {
+	if cmdType == utils.CmdTypeAllocation && displayOpts.ShowHostPorts {
 		summary.TopHostPorts = GetTopHostPortsData(results)
 	}
 	return summary, nil
@@ -228,9 +235,9 @@ func GetNodeResourceSummaryData(results []utils.NodeResult, showHostPorts bool, 
 
 // PrintNodeResourceSummary prints the summary section for resource allocation or utilization.
 // It includes total nodes and percentiles for CPU, Memory, and optionally Ephemeral Storage.
-// If cmdType is "allocation" and showHostPorts is true, it also prints top host port usage.
+// If cmdType is "allocation" and displayOpts.ShowHostPorts is true, it also prints top host port usage.
 // It writes the output to the provided io.Writer (e.g., os.Stdout).
-func PrintNodeResourceSummary(results []utils.NodeResult, showHostPorts bool, showEphemeralStorage bool, out io.Writer, cmdType utils.CmdType) {
+func PrintNodeResourceSummary(results []utils.NodeResult, displayOpts options.DisplayOptions, out io.Writer, cmdType utils.CmdType) {
 	if len(results) == 0 {
 		return // No data to summarize
 	}
@@ -251,18 +258,21 @@ func PrintNodeResourceSummary(results []utils.NodeResult, showHostPorts bool, sh
 	fmt.Fprintln(out, "\n"+summaryTitle)
 	fmt.Fprintf(out, "Total Nodes: %d\n", len(results))
 
-	// TODO: Update printResourcePercentiles and printResourceDistributionHistogram signatures
-	printResourcePercentiles(results, summaryContext, "CPU", out)
-	printResourceDistributionHistogram(results, summaryContext, "CPU", out)
-	printResourcePercentiles(results, summaryContext, "Memory", out)
-	printResourceDistributionHistogram(results, summaryContext, "Memory", out)
+	if displayOpts.ShowCPU {
+		printResourcePercentiles(results, summaryContext, "CPU", out)
+		printResourceDistributionHistogram(results, summaryContext, "CPU", out)
+	}
+	if displayOpts.ShowMemory {
+		printResourcePercentiles(results, summaryContext, "Memory", out)
+		printResourceDistributionHistogram(results, summaryContext, "Memory", out)
+	}
 
-	if showEphemeralStorage {
+	if displayOpts.ShowEphemeralStorage {
 		printResourcePercentiles(results, summaryContext, "EphemeralStorage", out)
 		printResourceDistributionHistogram(results, summaryContext, "EphemeralStorage", out)
 	}
 
-	if cmdType == utils.CmdTypeAllocation && showHostPorts {
+	if cmdType == utils.CmdTypeAllocation && displayOpts.ShowHostPorts {
 		printTopHostPorts(results, out)
 	}
 }
