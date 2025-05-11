@@ -5,18 +5,10 @@ import (
 	"context"
 	"fmt"
 
-	// "strings" // No longer needed after refactoring row population
-
 	"github.com/olekukonko/tablewriter"
-	// "os" // Not needed here based on allocations.go refactor
-
 	"github.com/spf13/cobra"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-
-	// Added for JSON output
-	"kubectl-node_resources/pkg/output"
-
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/client-go/kubernetes"
@@ -24,7 +16,7 @@ import (
 	metricsv "k8s.io/metrics/pkg/apis/metrics/v1beta1"
 	metricsclient "k8s.io/metrics/pkg/client/clientset/versioned"
 
-	// Use the correct module path
+	"kubectl-node_resources/pkg/output"
 	"kubectl-node_resources/pkg/summary"
 	"kubectl-node_resources/pkg/ui"
 	"kubectl-node_resources/pkg/utils"
@@ -36,9 +28,9 @@ func newUtilizationCmd(streams genericclioptions.IOStreams) *cobra.Command {
 	opts := genericclioptions.NewConfigFlags(true)
 	var (
 		sortBy     string
-		showFree   bool // Added for --show-free
+		showFree   bool
 		summaryOpt string
-		jsonOutput bool // Added for --json
+		jsonOutput bool
 	)
 
 	cmd := &cobra.Command{
@@ -68,7 +60,6 @@ Kubernetes metrics-server to be installed and running in the cluster.`,
 				selector = args[0]
 			}
 			klog.V(4).InfoS("Starting utilization command", "selector", selector, "sortBy", sortBy, "showFree", showFree, "summary", summaryOpt, "json", jsonOutput)
-			// Pass jsonOutput to runUtilization
 			return runUtilization(cmd.Context(), opts, selector, sortBy, showFree, summaryOpt, jsonOutput, streams)
 		},
 	}
@@ -181,51 +172,52 @@ func runUtilization(ctx context.Context, configFlags *genericclioptions.ConfigFl
 		if err := output.PrintJSON(jsonData, streams); err != nil {
 			return fmt.Errorf("failed to print JSON output for utilization: %w", err)
 		}
-	} else {
-		// Table Output Path
-		table := tablewriter.NewWriter(streams.Out)
-		headerVals := []string{"NODE", "CPU", "CPU USED", "CPU%", "MEMORY", "MEM USED", "MEM%"}
+		klog.V(4).InfoS("JSON output printed successfully")
+		return nil
+	}
+	// Table Output Path
+	table := tablewriter.NewWriter(streams.Out)
+	headerVals := []string{"NODE", "CPU", "CPU USED", "CPU%", "MEMORY", "MEM USED", "MEM%"}
+	if showFree {
+		headerVals = append(headerVals, "FREE CPU", "FREE MEMORY")
+	}
+	table.SetHeader(headerVals)
+	setKubectlTableStyle(table)
+
+	for _, res := range results {
+		allocCPU := res.Node.Status.Allocatable.Cpu()
+		allocMem := res.Node.Status.Allocatable.Memory()
+
+		cpuColor := ui.PercentFontColor(res.CPUPercent)
+		memColor := ui.PercentFontColor(res.MemPercent)
+
+		rowValues := []string{
+			res.Node.Name,
+			utils.FormatCPU(*allocCPU),
+			utils.FormatCPU(res.ReqCPU), // Actual used CPU
+			fmt.Sprintf("%s%.1f%%%s", cpuColor, res.CPUPercent, ui.ColorReset),
+			utils.FormatMemory(allocMem.Value()),
+			utils.FormatMemory(res.ReqMem.Value()), // Actual used Memory
+			fmt.Sprintf("%s%.1f%%%s", memColor, res.MemPercent, ui.ColorReset),
+		}
+
 		if showFree {
-			headerVals = append(headerVals, "FREE CPU", "FREE MEMORY")
+			freeCPUColor := ui.PercentBackgroundColor(res.CPUPercent) // Color based on utilization %
+			freeMemColor := ui.PercentBackgroundColor(res.MemPercent) // Color based on utilization %
+			rowValues = append(rowValues,
+				fmt.Sprintf("%s%s%s", freeCPUColor, utils.FormatCPU(res.FreeCPU), ui.ColorReset),
+				fmt.Sprintf("%s%s%s", freeMemColor, utils.FormatMemory(res.FreeMem.Value()), ui.ColorReset),
+			)
 		}
-		table.SetHeader(headerVals)
-		setKubectlTableStyle(table)
+		table.Append(rowValues)
+	}
 
-		for _, res := range results {
-			allocCPU := res.Node.Status.Allocatable.Cpu()
-			allocMem := res.Node.Status.Allocatable.Memory()
+	if summaryOpt != utils.SummaryOnly {
+		table.Render()
+	}
 
-			cpuColor := ui.PercentFontColor(res.CPUPercent)
-			memColor := ui.PercentFontColor(res.MemPercent)
-
-			rowValues := []string{
-				res.Node.Name,
-				utils.FormatCPU(*allocCPU),
-				utils.FormatCPU(res.ReqCPU), // Actual used CPU
-				fmt.Sprintf("%s%.1f%%%s", cpuColor, res.CPUPercent, ui.ColorReset),
-				utils.FormatMemory(allocMem.Value()),
-				utils.FormatMemory(res.ReqMem.Value()), // Actual used Memory
-				fmt.Sprintf("%s%.1f%%%s", memColor, res.MemPercent, ui.ColorReset),
-			}
-
-			if showFree {
-				freeCPUColor := ui.PercentBackgroundColor(res.CPUPercent) // Color based on utilization %
-				freeMemColor := ui.PercentBackgroundColor(res.MemPercent) // Color based on utilization %
-				rowValues = append(rowValues,
-					fmt.Sprintf("%s%s%s", freeCPUColor, utils.FormatCPU(res.FreeCPU), ui.ColorReset),
-					fmt.Sprintf("%s%s%s", freeMemColor, utils.FormatMemory(res.FreeMem.Value()), ui.ColorReset),
-				)
-			}
-			table.Append(rowValues)
-		}
-
-		if summaryOpt != utils.SummaryOnly {
-			table.Render()
-		}
-
-		if summaryOpt == utils.SummaryShow || summaryOpt == utils.SummaryOnly {
-			summary.PrintNodeResourceSummary(results, false /*showHostPorts*/, streams.Out, output.CmdTypeUtilization)
-		}
+	if summaryOpt == utils.SummaryShow || summaryOpt == utils.SummaryOnly {
+		summary.PrintNodeResourceSummary(results, false /*showHostPorts*/, streams.Out, output.CmdTypeUtilization)
 	}
 
 	klog.V(4).InfoS("Utilization command finished successfully")

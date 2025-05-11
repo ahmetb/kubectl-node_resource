@@ -9,31 +9,19 @@ import (
 	"strings"
 
 	"github.com/olekukonko/tablewriter"
-	// TODO: Update this import path once progressbar_utils.go is moved
-	// For now, assuming it's in the main package or a directly accessible path.
-	// If progressbarHelper is in main, we might need to pass it or rethink its direct usage here.
-	// For now, let's assume newProgressBarHelper is accessible.
-	// Similar consideration for GetColorForPercentage and colorReset from color_utils.go
-
 	"github.com/spf13/cobra"
 	"golang.org/x/sync/errgroup"
 	corev1 "k8s.io/api/core/v1"
-
-	// Added for JSON output
-	"kubectl-node_resources/pkg/output"
-
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 
-	// Corrected import path for utils package
+	"kubectl-node_resources/pkg/output"
 	"kubectl-node_resources/pkg/summary"
-	"kubectl-node_resources/pkg/utils"
-
-	// TODO: Import progressbar utils from their new pkg location once moved
 	"kubectl-node_resources/pkg/ui"
+	"kubectl-node_resources/pkg/utils"
 )
 
 // newAllocationCmd returns the allocation subcommand.
@@ -248,66 +236,67 @@ func runAllocation(ctx context.Context, configFlags *genericclioptions.ConfigFla
 		if err := output.PrintJSON(jsonData, streams); err != nil {
 			return fmt.Errorf("failed to print JSON output for allocation: %w", err)
 		}
-	} else {
-		// Table Output Path
-		table := tablewriter.NewWriter(streams.Out)
-		headerSlice := []string{"NODE", "CPU", "CPU REQ", "CPU%", "MEMORY", "MEM REQ", "MEM%"}
+		klog.V(4).InfoS("JSON output printed successfully")
+		return nil
+	}
+	// Table Output Path
+	table := tablewriter.NewWriter(streams.Out)
+	headerSlice := []string{"NODE", "CPU", "CPU REQ", "CPU%", "MEMORY", "MEM REQ", "MEM%"}
+	if showFree {
+		headerSlice = append(headerSlice, "FREE CPU", "FREE MEMORY")
+	}
+	if showHostPorts {
+		headerSlice = append(headerSlice, "HOST PORTS")
+	}
+	table.SetHeader(headerSlice)
+	setKubectlTableStyle(table)
+
+	for _, res := range results {
+		allocCPU := res.Node.Status.Allocatable.Cpu()
+		allocMem := res.Node.Status.Allocatable.Memory()
+
+		cpuColor := ui.PercentFontColor(res.CPUPercent)
+		memColor := ui.PercentFontColor(res.MemPercent)
+
+		rowValues := []string{
+			res.Node.Name,
+			utils.FormatCPU(*allocCPU),
+			utils.FormatCPU(res.ReqCPU),
+			fmt.Sprintf("%s%.1f%%%s", cpuColor, res.CPUPercent, ui.ColorReset),
+			utils.FormatMemory(allocMem.Value()),
+			utils.FormatMemory(res.ReqMem.Value()),
+			fmt.Sprintf("%s%.1f%%%s", memColor, res.MemPercent, ui.ColorReset),
+		}
+
 		if showFree {
-			headerSlice = append(headerSlice, "FREE CPU", "FREE MEMORY")
+			freeCPUColor := ui.PercentBackgroundColor(res.CPUPercent)
+			freeMemColor := ui.PercentBackgroundColor(res.MemPercent)
+			rowValues = append(rowValues,
+				fmt.Sprintf("%s%s%s", freeCPUColor, utils.FormatCPU(res.FreeCPU), ui.ColorReset),
+				fmt.Sprintf("%s%s%s", freeMemColor, utils.FormatMemory(res.FreeMem.Value()), ui.ColorReset),
+			)
 		}
+
 		if showHostPorts {
-			headerSlice = append(headerSlice, "HOST PORTS")
-		}
-		table.SetHeader(headerSlice)
-		setKubectlTableStyle(table)
-
-		for _, res := range results {
-			allocCPU := res.Node.Status.Allocatable.Cpu()
-			allocMem := res.Node.Status.Allocatable.Memory()
-
-			cpuColor := ui.PercentFontColor(res.CPUPercent)
-			memColor := ui.PercentFontColor(res.MemPercent)
-
-			rowValues := []string{
-				res.Node.Name,
-				utils.FormatCPU(*allocCPU),
-				utils.FormatCPU(res.ReqCPU),
-				fmt.Sprintf("%s%.1f%%%s", cpuColor, res.CPUPercent, ui.ColorReset),
-				utils.FormatMemory(allocMem.Value()),
-				utils.FormatMemory(res.ReqMem.Value()),
-				fmt.Sprintf("%s%.1f%%%s", memColor, res.MemPercent, ui.ColorReset),
+			portStrings := make([]string, len(res.HostPorts))
+			for i, port := range res.HostPorts {
+				portStrings[i] = strconv.Itoa(int(port))
 			}
-
-			if showFree {
-				freeCPUColor := ui.PercentBackgroundColor(res.CPUPercent)
-				freeMemColor := ui.PercentBackgroundColor(res.MemPercent)
-				rowValues = append(rowValues,
-					fmt.Sprintf("%s%s%s", freeCPUColor, utils.FormatCPU(res.FreeCPU), ui.ColorReset),
-					fmt.Sprintf("%s%s%s", freeMemColor, utils.FormatMemory(res.FreeMem.Value()), ui.ColorReset),
-				)
+			if len(portStrings) == 0 {
+				rowValues = append(rowValues, "-")
+			} else {
+				rowValues = append(rowValues, strings.Join(portStrings, ","))
 			}
-
-			if showHostPorts {
-				portStrings := make([]string, len(res.HostPorts))
-				for i, port := range res.HostPorts {
-					portStrings[i] = strconv.Itoa(int(port))
-				}
-				if len(portStrings) == 0 {
-					rowValues = append(rowValues, "-")
-				} else {
-					rowValues = append(rowValues, strings.Join(portStrings, ","))
-				}
-			}
-			table.Append(rowValues)
 		}
+		table.Append(rowValues)
+	}
 
-		if summaryOpt != utils.SummaryOnly {
-			table.Render()
-		}
+	if summaryOpt != utils.SummaryOnly {
+		table.Render()
+	}
 
-		if summaryOpt == utils.SummaryShow || summaryOpt == utils.SummaryOnly {
-			summary.PrintNodeResourceSummary(results, showHostPorts, streams.Out, "allocation") // Added type
-		}
+	if summaryOpt == utils.SummaryShow || summaryOpt == utils.SummaryOnly {
+		summary.PrintNodeResourceSummary(results, showHostPorts, streams.Out, "allocation") // Added type
 	}
 
 	klog.V(4).InfoS("Allocation command finished successfully")
@@ -367,6 +356,7 @@ func aggregatePodRequests(pod *corev1.Pod) (resource.Quantity, resource.Quantity
 	return sumCPU, sumMem
 }
 
+// setKubectlTableStyle sets the table style for table output.
 func setKubectlTableStyle(table *tablewriter.Table) {
 	table.SetAutoWrapText(false)
 	table.SetAutoFormatHeaders(true)
