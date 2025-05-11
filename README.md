@@ -9,6 +9,15 @@ consumed across their cluster's nodes and node pools.
 
 <!-- Screenshots will be inserted here later -->
 
+## Installation
+
+If you have [Krew](https://krew.sigs.k8s.io/) installed, you can install
+`node-resource` with the following command:
+
+```bash
+kubectl krew install node-resource
+```
+
 ## Features
 
 - **Summary View**: Provides a summary view with histograms and distribution
@@ -28,37 +37,13 @@ resource pressure on each node.
 
 ## Usage
 
-### `kubectl node-resource utilization` subcommand
+This plugin offers two main subcommands:
 
-Displays the actual resource utilization of nodes, similar to `kubectl top
-node`. It shows each node's allocatable CPU and memory, the actual CPU and
-memory currently used, and the percentage of allocatable resources utilized.
-This command requires the Kubernetes metrics-server to be installed and running
-in the cluster.
+- [**`utilization`**](#utilization-subcommand): Show pod resource allocations on nodes
+- [**`allocation`**](#allocation-subcommand): Show actual resource utilization on nodes.
 
-**Examples:**
 
-1.  Show utilization for all nodes, sorted by CPU percentage (default sort):
-    ```bash
-    kubectl node-resource utilization
-    ```
-
-2.  Show utilization for nodes with the label `role=worker`:
-    ```bash
-    kubectl node-resource utilization "role=worker"
-    ```
-
-3.  Show utilization and include a column for free (allocatable - used) resources:
-    ```bash
-    kubectl node-resource utilization --show-free
-    ```
-
-4.  Show utilization for all nodes, sorted by memory percentage, and output in JSON format:
-    ```bash
-    kubectl node-resource utilization --sort-by=mem-percent --json
-    ```
-
-### `kubectl node-resource allocation` subcommand
+### `allocation` subcommand
 
 Displays the resource allocation on nodes based on the sum of pod resource
 requests. It shows each node's allocatable CPU and memory, the sum of CPU and
@@ -87,16 +72,35 @@ resources requested.
     kubectl node-resource allocation "kubernetes.io/hostname=node1" --sort-by=mem-percent --show-free
     ```
 
-## Installation
+### `utilization` subcommand
 
-### Via Krew (Kubernetes plugin manager)
+Displays the actual resource utilization of nodes, similar to `kubectl top
+node`. It shows each node's allocatable CPU and memory, the actual CPU and
+memory currently used, and the percentage of allocatable resources utilized.
+This command requires the Kubernetes metrics-server to be installed and running
+in the cluster.
 
-If you have [Krew](https://krew.sigs.k8s.io/) installed, you can install
-`node-resource` with the following command:
+**Examples:**
 
-```bash
-kubectl krew install node-resource
-```
+1.  Show utilization for all nodes, sorted by CPU percentage (default sort):
+    ```bash
+    kubectl node-resource utilization
+    ```
+
+2.  Show utilization for nodes with the label `role=worker`:
+    ```bash
+    kubectl node-resource utilization "role=worker"
+    ```
+
+3.  Show utilization and include a column for free (allocatable - used) resources:
+    ```bash
+    kubectl node-resource utilization --show-free
+    ```
+
+4.  Show utilization for all nodes, sorted by memory percentage, and output in JSON format:
+    ```bash
+    kubectl node-resource utilization --sort-by=mem-percent --json
+    ```
 
 ## License
 
