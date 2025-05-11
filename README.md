@@ -7,7 +7,32 @@ utilization (based on metrics-server data).
 It helps administrators and developers understand how resources are being
 consumed across their cluster's nodes and node pools.
 
-<!-- Screenshots will be inserted here later -->
+<table>
+  <thead>
+    <tr>
+      <th>Node Allocations View</th>
+      <th>Node Utilization View</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>
+        List only view:
+        <img src="img/alloc-list.png" alt="Node Allocations View" width="600">
+        <br/>
+        Summary-only view:
+        <img src="img/alloc-summary.png" alt="Node Allocations Summary" width="600">
+      </td>
+      <td>
+        List with summary view:
+        <img src="img/util-list.png" alt="Node Utilization View" width="600">
+        <br/>
+        Structured output:
+        <img src="img/util-json.png" alt="Node Utilization JSON output" width="600">
+      </td>
+    </tr>
+  </tbody>
+</table>
 
 ## Installation
 
@@ -26,7 +51,7 @@ buckets for resource allocation and utilization.
 integration with other tools and scripts.
 - **Fast Pod Querying**:
 Utilizes optimized and parallel pod querying from the API server's watch cache
-for the `allocation` command.
+for the `allocation` command. Works well with large clusters.
 - **Color Output**: Uses color-coded output in the terminal to visually indicate
 resource pressure on each node.
 - **Flexible Sorting and Filtering**: Sort nodes by CPU/memory usage percentage.
@@ -77,7 +102,8 @@ resources requested.
     </tr>
     <tr>
       <td>Show allocation for a specific node named <code>node1</code>, sorted by memory percentage, and include free (allocatable - requested) resources.</td>
-      <td><pre>kubectl node-resource allocation "kubernetes.io/hostname=node1" \
+      <td><pre>kubectl node-resource allocation \
+      "kubernetes.io/hostname=node1" \
 	--sort-by=mem-percent \
 	--show-free</pre></td>
     </tr>
@@ -89,8 +115,10 @@ resources requested.
 Displays the actual resource utilization of nodes, similar to `kubectl top
 node`. It shows each node's allocatable CPU and memory, the actual CPU and
 memory currently used, and the percentage of allocatable resources utilized.
-This command requires the Kubernetes metrics-server to be installed and running
+This command requires the Kubernetes [metrics-server] to be installed and running
 in the cluster.
+
+[metrics-server]: https://github.com/kubernetes-sigs/metrics-server
 
 **Examples:**
 
