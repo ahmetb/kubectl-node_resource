@@ -24,16 +24,15 @@ import (
 	"kubectl-node_resources/pkg/utils"
 )
 
-// newAllocationCmd returns the allocation subcommand.
-// This command displays resource allocation (sum of pod resource requests) for nodes.
+// newAllocationCmd returns a command displays resource allocation (sum of pod resource requests) for nodes.
 func newAllocationCmd(streams genericclioptions.IOStreams) *cobra.Command {
 	opts := genericclioptions.NewConfigFlags(true)
 	var (
 		sortBy        string
 		showHostPorts bool
-		showFree      bool // Added for --show-free
+		showFree      bool
 		summaryOpt    string
-		jsonOutput    bool // Added for --json
+		jsonOutput    bool
 	)
 
 	cmd := &cobra.Command{
@@ -69,24 +68,45 @@ Nodes can be filtered by a label selector.`,
 				selector = args[0]
 			}
 			klog.V(4).InfoS("Starting allocation command", "selector", selector, "sortBy", sortBy, "showHostPorts", showHostPorts, "showFree", showFree, "summary", summaryOpt, "json", jsonOutput)
-			// Pass jsonOutput to runAllocation
-			return runAllocation(cmd.Context(), opts, selector, sortBy, showHostPorts, showFree, summaryOpt, jsonOutput, streams)
+
+			runOpts := allocationRunOptions{
+				configFlags:   opts,
+				streams:       streams,
+				nodeSelector:  selector,
+				sortBy:        sortBy,
+				showHostPorts: showHostPorts,
+				showFree:      showFree,
+				summaryOpt:    summaryOpt,
+				jsonOutput:    jsonOutput,
+			}
+			return runAllocation(cmd.Context(), runOpts)
 		},
 	}
 
 	cmd.Flags().StringVar(&sortBy, "sort-by", utils.SortByCPUPercent, fmt.Sprintf("Sort nodes by: %s, %s, or %s", utils.SortByCPUPercent, utils.SortByMemoryPercent, utils.SortByNodeName))
 	cmd.Flags().BoolVar(&showHostPorts, "show-host-ports", false, "Show host ports used by containers on each node")
-	cmd.Flags().BoolVar(&showFree, "show-free", false, "Show free CPU and Memory on each node") // Added flag
+	cmd.Flags().BoolVar(&showFree, "show-free", false, "Show free CPU and Memory on each node")
 	cmd.Flags().StringVar(&summaryOpt, "summary", utils.SummaryShow, fmt.Sprintf("Summary display option: %s, %s, or %s", utils.SummaryShow, utils.SummaryOnly, utils.SummaryHide))
-	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSON format") // Added --json flag
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
 	opts.AddFlags(cmd.Flags())
 	return cmd
 }
 
+type allocationRunOptions struct {
+	configFlags   *genericclioptions.ConfigFlags
+	streams       genericclioptions.IOStreams
+	nodeSelector  string
+	sortBy        string
+	showHostPorts bool
+	showFree      bool
+	summaryOpt    string
+	jsonOutput    bool
+}
+
 // runAllocation executes the core logic for the allocation command.
 // It fetches node and pod data, calculates resource allocations, and prints the results.
-func runAllocation(ctx context.Context, configFlags *genericclioptions.ConfigFlags, nodeSelector string, sortBy string, showHostPorts bool, showFree bool, summaryOpt string, jsonOutputFlag bool, streams genericclioptions.IOStreams) error {
-	config, err := configFlags.ToRESTConfig()
+func runAllocation(ctx context.Context, opts allocationRunOptions) error {
+	config, err := opts.configFlags.ToRESTConfig()
 	if err != nil {
 		return fmt.Errorf("failed to build Kubernetes client config: %w", err)
 	}
@@ -100,13 +120,13 @@ func runAllocation(ctx context.Context, configFlags *genericclioptions.ConfigFla
 	}
 
 	// Context for Kubernetes API calls is now passed in (cmd.Context())
-	allNodes, err := utils.GetAllNodesWithPagination(ctx, clientset, nodeSelector)
+	allNodes, err := utils.GetAllNodesWithPagination(ctx, clientset, opts.nodeSelector)
 	if err != nil {
-		return fmt.Errorf("failed to get all nodes with pagination (selector: %s): %w", nodeSelector, err)
+		return fmt.Errorf("failed to get all nodes with pagination (selector: %s): %w", opts.nodeSelector, err)
 	}
 	if len(allNodes) == 0 {
-		klog.InfoS("No nodes found with the given selector.", "selector", nodeSelector)
-		fmt.Fprintln(streams.Out, "No nodes found with the given selector.")
+		klog.InfoS("No nodes found with the given selector.", "selector", opts.nodeSelector)
+		fmt.Fprintln(opts.streams.Out, "No nodes found with the given selector.")
 		return nil
 	}
 
@@ -143,7 +163,7 @@ func runAllocation(ctx context.Context, configFlags *genericclioptions.ConfigFla
 				podCPU, podMem := aggregatePodRequests(&pod)
 				totalCPU.Add(podCPU)
 				totalMem.Add(podMem)
-				if showHostPorts {
+				if opts.showHostPorts {
 					for _, container := range pod.Spec.Containers {
 						for _, port := range container.Ports {
 							if port.HostPort > 0 {
@@ -179,7 +199,7 @@ func runAllocation(ctx context.Context, configFlags *genericclioptions.ConfigFla
 			}
 
 			var currentHostPorts []int32
-			if showHostPorts {
+			if opts.showHostPorts {
 				for port := range hostPortsMap {
 					currentHostPorts = append(currentHostPorts, port)
 				}
@@ -193,8 +213,8 @@ func runAllocation(ctx context.Context, configFlags *genericclioptions.ConfigFla
 				CPUPercent: cpuPercent,
 				MemPercent: memPercent,
 				HostPorts:  currentHostPorts,
-				FreeCPU:    freeCPU, // Store calculated free CPU
-				FreeMem:    freeMem, // Store calculated free Memory
+				FreeCPU:    freeCPU,
+				FreeMem:    freeMem,
 			}
 			klog.V(5).InfoS("Finished processing node", "nodeName", node.Name, "reqCPU", totalCPU.String(), "reqMem", totalMem.String(), "freeCPU", freeCPU.String(), "freeMem", freeMem.String())
 
@@ -212,7 +232,7 @@ func runAllocation(ctx context.Context, configFlags *genericclioptions.ConfigFla
 		}
 		// klog.ErrorS is appropriate here as it's a top-level error for the command execution step.
 		klog.ErrorS(err, "Error processing nodes")
-		return fmt.Errorf("error processing nodes: %w", err) // Propagate the error
+		return fmt.Errorf("error processing nodes: %w", err)
 	}
 
 	if progressHelper != nil {
@@ -220,12 +240,12 @@ func runAllocation(ctx context.Context, configFlags *genericclioptions.ConfigFla
 	}
 	klog.V(4).InfoS("All nodes processed successfully")
 
-	utils.SortResults(results, sortBy)
-	klog.V(4).InfoS("Results sorted", "sortBy", sortBy)
+	utils.SortResults(results, opts.sortBy)
+	klog.V(4).InfoS("Results sorted", "sortBy", opts.sortBy)
 
-	if jsonOutputFlag {
+	if opts.jsonOutput {
 		// JSON Output Path
-		jsonData, err := output.GetJSONOutput(results, output.CmdTypeAllocation, showFree, showHostPorts, summaryOpt,
+		jsonData, err := output.GetJSONOutput(results, output.CmdTypeAllocation, opts.showFree, opts.showHostPorts, opts.summaryOpt,
 			func(r []utils.NodeResult, shp bool, cType string) (*output.JSONSummary, error) {
 				// cType here will be output.CmdTypeAllocation, passed by GetJSONOutput
 				return summary.GetNodeResourceSummaryData(r, shp, cType)
@@ -233,19 +253,19 @@ func runAllocation(ctx context.Context, configFlags *genericclioptions.ConfigFla
 		if err != nil {
 			return fmt.Errorf("failed to prepare JSON data for allocation: %w", err)
 		}
-		if err := output.PrintJSON(jsonData, streams); err != nil {
+		if err := output.PrintJSON(jsonData, opts.streams); err != nil {
 			return fmt.Errorf("failed to print JSON output for allocation: %w", err)
 		}
 		klog.V(4).InfoS("JSON output printed successfully")
 		return nil
 	}
 	// Table Output Path
-	table := tablewriter.NewWriter(streams.Out)
+	table := tablewriter.NewWriter(opts.streams.Out)
 	headerSlice := []string{"NODE", "CPU", "CPU REQ", "CPU%", "MEMORY", "MEM REQ", "MEM%"}
-	if showFree {
+	if opts.showFree {
 		headerSlice = append(headerSlice, "FREE CPU", "FREE MEMORY")
 	}
-	if showHostPorts {
+	if opts.showHostPorts {
 		headerSlice = append(headerSlice, "HOST PORTS")
 	}
 	table.SetHeader(headerSlice)
@@ -268,7 +288,7 @@ func runAllocation(ctx context.Context, configFlags *genericclioptions.ConfigFla
 			fmt.Sprintf("%s%.1f%%%s", memColor, res.MemPercent, ui.ColorReset),
 		}
 
-		if showFree {
+		if opts.showFree {
 			freeCPUColor := ui.PercentBackgroundColor(res.CPUPercent)
 			freeMemColor := ui.PercentBackgroundColor(res.MemPercent)
 			rowValues = append(rowValues,
@@ -277,7 +297,7 @@ func runAllocation(ctx context.Context, configFlags *genericclioptions.ConfigFla
 			)
 		}
 
-		if showHostPorts {
+		if opts.showHostPorts {
 			portStrings := make([]string, len(res.HostPorts))
 			for i, port := range res.HostPorts {
 				portStrings[i] = strconv.Itoa(int(port))
@@ -291,12 +311,12 @@ func runAllocation(ctx context.Context, configFlags *genericclioptions.ConfigFla
 		table.Append(rowValues)
 	}
 
-	if summaryOpt != utils.SummaryOnly {
+	if opts.summaryOpt != utils.SummaryOnly {
 		table.Render()
 	}
 
-	if summaryOpt == utils.SummaryShow || summaryOpt == utils.SummaryOnly {
-		summary.PrintNodeResourceSummary(results, showHostPorts, streams.Out, "allocation") // Added type
+	if opts.summaryOpt == utils.SummaryShow || opts.summaryOpt == utils.SummaryOnly {
+		summary.PrintNodeResourceSummary(results, opts.showHostPorts, opts.streams.Out, "allocation")
 	}
 
 	klog.V(4).InfoS("Allocation command finished successfully")
@@ -356,7 +376,6 @@ func aggregatePodRequests(pod *corev1.Pod) (resource.Quantity, resource.Quantity
 	return sumCPU, sumMem
 }
 
-// setKubectlTableStyle sets the table style for table output.
 func setKubectlTableStyle(table *tablewriter.Table) {
 	table.SetAutoWrapText(false)
 	table.SetAutoFormatHeaders(true)
@@ -367,6 +386,6 @@ func setKubectlTableStyle(table *tablewriter.Table) {
 	table.SetRowSeparator("")
 	table.SetHeaderLine(false)
 	table.SetBorder(false)
-	table.SetTablePadding("  ") // pad with tabs
+	table.SetTablePadding("  ") // two spaces for padding
 	table.SetNoWhiteSpace(true)
 }

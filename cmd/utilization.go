@@ -22,8 +22,7 @@ import (
 	"kubectl-node_resources/pkg/utils"
 )
 
-// newUtilizationCmd returns the utilization subcommand.
-// This command displays actual node resource utilization (similar to 'kubectl top node').
+// newUtilizationCmd returns a command displays actual node resource utilization (similar to 'kubectl top node').
 func newUtilizationCmd(streams genericclioptions.IOStreams) *cobra.Command {
 	opts := genericclioptions.NewConfigFlags(true)
 	var (
@@ -60,22 +59,42 @@ Kubernetes metrics-server to be installed and running in the cluster.`,
 				selector = args[0]
 			}
 			klog.V(4).InfoS("Starting utilization command", "selector", selector, "sortBy", sortBy, "showFree", showFree, "summary", summaryOpt, "json", jsonOutput)
-			return runUtilization(cmd.Context(), opts, selector, sortBy, showFree, summaryOpt, jsonOutput, streams)
+
+			runOpts := utilizationRunOptions{
+				configFlags:  opts,
+				streams:      streams,
+				nodeSelector: selector,
+				sortBy:       sortBy,
+				showFree:     showFree,
+				summaryOpt:   summaryOpt,
+				jsonOutput:   jsonOutput,
+			}
+			return runUtilization(cmd.Context(), runOpts)
 		},
 	}
 
 	cmd.Flags().StringVar(&sortBy, "sort-by", utils.SortByCPUPercent, fmt.Sprintf("Sort nodes by: %s, %s, or %s", utils.SortByCPUPercent, utils.SortByMemoryPercent, utils.SortByNodeName))
-	cmd.Flags().BoolVar(&showFree, "show-free", false, "Show free CPU and Memory on each node") // Added flag
+	cmd.Flags().BoolVar(&showFree, "show-free", false, "Show free CPU and Memory on each node")
 	cmd.Flags().StringVar(&summaryOpt, "summary", utils.SummaryShow, fmt.Sprintf("Summary display option: %s, %s, or %s", utils.SummaryShow, utils.SummaryOnly, utils.SummaryHide))
-	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSON format") // Added --json flag
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
 	opts.AddFlags(cmd.Flags())
 	return cmd
 }
 
+type utilizationRunOptions struct {
+	configFlags  *genericclioptions.ConfigFlags
+	streams      genericclioptions.IOStreams
+	nodeSelector string
+	sortBy       string
+	showFree     bool
+	summaryOpt   string
+	jsonOutput   bool
+}
+
 // runUtilization executes the core logic for the utilization command.
 // It fetches node data and metrics, calculates resource utilization, and prints the results.
-func runUtilization(ctx context.Context, configFlags *genericclioptions.ConfigFlags, nodeSelector string, sortBy string, showFree bool, summaryOpt string, jsonOutputFlag bool, streams genericclioptions.IOStreams) error {
-	config, err := configFlags.ToRESTConfig()
+func runUtilization(ctx context.Context, opts utilizationRunOptions) error {
+	config, err := opts.configFlags.ToRESTConfig()
 	if err != nil {
 		return fmt.Errorf("failed to build Kubernetes client config: %w", err)
 	}
@@ -91,13 +110,13 @@ func runUtilization(ctx context.Context, configFlags *genericclioptions.ConfigFl
 	}
 
 	// Context for Kubernetes API calls is now passed in (cmd.Context())
-	allNodes, err := utils.GetAllNodesWithPagination(ctx, clientset, nodeSelector)
+	allNodes, err := utils.GetAllNodesWithPagination(ctx, clientset, opts.nodeSelector)
 	if err != nil {
-		return fmt.Errorf("failed to get all nodes with pagination for utilization (selector: %s): %w", nodeSelector, err)
+		return fmt.Errorf("failed to get all nodes with pagination for utilization (selector: %s): %w", opts.nodeSelector, err)
 	}
 	if len(allNodes) == 0 {
-		klog.InfoS("No nodes found with the given selector for utilization.", "selector", nodeSelector)
-		fmt.Fprintln(streams.Out, "No nodes found with the given selector for utilization.")
+		klog.InfoS("No nodes found with the given selector for utilization.", "selector", opts.nodeSelector)
+		fmt.Fprintln(opts.streams.Out, "No nodes found with the given selector for utilization.")
 		return nil
 	}
 
@@ -150,18 +169,18 @@ func runUtilization(ctx context.Context, configFlags *genericclioptions.ConfigFl
 			ReqMem:     actMem,
 			CPUPercent: utils.CalculatePercent(actCPU.AsApproximateFloat64(), allocCPU.AsApproximateFloat64()),
 			MemPercent: utils.CalculatePercent(float64(actMem.Value()), float64(allocMem.Value())),
-			FreeCPU:    freeCPU, // Store calculated free CPU
-			FreeMem:    freeMem, // Store calculated free Memory
+			FreeCPU:    freeCPU,
+			FreeMem:    freeMem,
 			// HostPorts are not relevant for utilization command
 		}
 	}
 
-	utils.SortResults(results, sortBy)
-	klog.V(4).InfoS("Utilization results sorted", "sortBy", sortBy)
+	utils.SortResults(results, opts.sortBy)
+	klog.V(4).InfoS("Utilization results sorted", "sortBy", opts.sortBy)
 
-	if jsonOutputFlag {
+	if opts.jsonOutput {
 		// JSON Output Path
-		jsonData, err := output.GetJSONOutput(results, output.CmdTypeUtilization, showFree, false /*showHostPorts*/, summaryOpt,
+		jsonData, err := output.GetJSONOutput(results, output.CmdTypeUtilization, opts.showFree, false /*showHostPorts*/, opts.summaryOpt,
 			func(r []utils.NodeResult, shp bool, cType string) (*output.JSONSummary, error) {
 				// cType here will be output.CmdTypeUtilization, passed by GetJSONOutput
 				return summary.GetNodeResourceSummaryData(r, shp, cType)
@@ -169,16 +188,16 @@ func runUtilization(ctx context.Context, configFlags *genericclioptions.ConfigFl
 		if err != nil {
 			return fmt.Errorf("failed to prepare JSON data for utilization: %w", err)
 		}
-		if err := output.PrintJSON(jsonData, streams); err != nil {
+		if err := output.PrintJSON(jsonData, opts.streams); err != nil {
 			return fmt.Errorf("failed to print JSON output for utilization: %w", err)
 		}
 		klog.V(4).InfoS("JSON output printed successfully")
 		return nil
 	}
 	// Table Output Path
-	table := tablewriter.NewWriter(streams.Out)
+	table := tablewriter.NewWriter(opts.streams.Out)
 	headerVals := []string{"NODE", "CPU", "CPU USED", "CPU%", "MEMORY", "MEM USED", "MEM%"}
-	if showFree {
+	if opts.showFree {
 		headerVals = append(headerVals, "FREE CPU", "FREE MEMORY")
 	}
 	table.SetHeader(headerVals)
@@ -201,7 +220,7 @@ func runUtilization(ctx context.Context, configFlags *genericclioptions.ConfigFl
 			fmt.Sprintf("%s%.1f%%%s", memColor, res.MemPercent, ui.ColorReset),
 		}
 
-		if showFree {
+		if opts.showFree {
 			freeCPUColor := ui.PercentBackgroundColor(res.CPUPercent) // Color based on utilization %
 			freeMemColor := ui.PercentBackgroundColor(res.MemPercent) // Color based on utilization %
 			rowValues = append(rowValues,
@@ -212,12 +231,12 @@ func runUtilization(ctx context.Context, configFlags *genericclioptions.ConfigFl
 		table.Append(rowValues)
 	}
 
-	if summaryOpt != utils.SummaryOnly {
+	if opts.summaryOpt != utils.SummaryOnly {
 		table.Render()
 	}
 
-	if summaryOpt == utils.SummaryShow || summaryOpt == utils.SummaryOnly {
-		summary.PrintNodeResourceSummary(results, false /*showHostPorts*/, streams.Out, output.CmdTypeUtilization)
+	if opts.summaryOpt == utils.SummaryShow || opts.summaryOpt == utils.SummaryOnly {
+		summary.PrintNodeResourceSummary(results, false /*showHostPorts*/, opts.streams.Out, output.CmdTypeUtilization)
 	}
 
 	klog.V(4).InfoS("Utilization command finished successfully")

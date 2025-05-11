@@ -8,8 +8,7 @@ import (
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 )
 
-// NewRootCmd creates the root command for kubectl node-resource.
-// It sets up the command structure, persistent flags, and subcommands.
+// rootCmd sets up the command structure, persistent flags, and subcommands.
 func NewRootCmd(streams genericclioptions.IOStreams) *cobra.Command {
 	rootCmd := &cobra.Command{
 		Use:   "kubectl node-resource",
