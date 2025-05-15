@@ -28,6 +28,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
@@ -176,8 +177,13 @@ func runAllocation(ctx context.Context, opts allocationRunOptions) error {
 		g.Go(func() error {
 			klog.V(5).InfoS("Processing node", "nodeName", node.Name)
 
+			fieldSelector := fields.AndSelectors(
+				fields.OneTermEqualSelector("spec.nodeName", node.Name),
+				fields.OneTermNotEqualSelector("status.phase", string(corev1.PodSucceeded)),
+				fields.OneTermNotEqualSelector("status.phase", string(corev1.PodFailed)),
+			)
 			podList, err := clientset.CoreV1().Pods("").List(gCtx, metav1.ListOptions{
-				FieldSelector:   "spec.nodeName=" + node.Name,
+				FieldSelector:   fieldSelector.String(),
 				ResourceVersion: "0",  // Get latest from cache if possible, otherwise direct API call
 				Limit:           1000, // Limit pods per node call, adjust if necessary
 			})
