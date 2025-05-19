@@ -20,16 +20,17 @@ type DisplayOptions struct {
 	ShowMemory           bool
 	ShowFree             bool
 	ShowHostPorts        bool // Relevant for allocation command
+	ShowTaints           bool // Relevant for allocation command
 	ShowEphemeralStorage bool // Relevant for allocation command
 	ShowGPU              bool
 	GpuResourceKey       string
 	JSONOutput           bool
 }
 
-// HasPrimaryDataColumns checks if any of the primary data columns (CPU, Memory, EphemeralStorage, HostPorts, GPU)
+// HasPrimaryDataColumns checks if any of the primary data columns (CPU, Memory, EphemeralStorage, HostPorts, GPU, Taints)
 // are set to be displayed. This is used to determine if there's any content to show in a table.
 // ShowFree is not considered a "primary" column on its own as it typically accompanies other columns.
 // JSONOutput is an output format, not a column itself.
 func (do *DisplayOptions) HasPrimaryDataColumns() bool {
-	return do.ShowCPU || do.ShowMemory || do.ShowEphemeralStorage || do.ShowHostPorts || do.ShowGPU
+	return do.ShowCPU || do.ShowMemory || do.ShowEphemeralStorage || do.ShowHostPorts || do.ShowGPU || do.ShowTaints
 }
