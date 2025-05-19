@@ -30,6 +30,7 @@ type NodeResult struct {
 	CPUPercent float64
 	MemPercent float64
 	HostPorts  []int32
+	Taints     []corev1.Taint
 	FreeCPU    resource.Quantity // Added for --show-free
 	FreeMem    resource.Quantity // Added for --show-free
 
