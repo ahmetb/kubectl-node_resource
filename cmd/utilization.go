@@ -19,7 +19,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/olekukonko/tablewriter"
 	"github.com/spf13/cobra"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -234,7 +233,7 @@ func runUtilization(ctx context.Context, opts utilizationRunOptions) error {
 	}
 
 	// Table Output Path
-	table := tablewriter.NewWriter(opts.streams.Out)
+	table := newKubectlStyleTable(opts.streams.Out)
 	var headerVals []string
 	headerVals = append(headerVals, "NODE")
 
@@ -254,8 +253,7 @@ func runUtilization(ctx context.Context, opts utilizationRunOptions) error {
 			headerVals = append(headerVals, "FREE MEMORY")
 		}
 	}
-	table.SetHeader(headerVals)
-	setKubectlTableStyle(table)
+	table.Header(headerVals)
 
 	for _, res := range results {
 		allocCPU := res.Node.Status.Allocatable.Cpu()

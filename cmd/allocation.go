@@ -18,11 +18,14 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
 	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/olekukonko/tablewriter"
+	"github.com/olekukonko/tablewriter/renderer"
+	"github.com/olekukonko/tablewriter/tw"
 	"github.com/spf13/cobra"
 	"golang.org/x/sync/errgroup"
 	corev1 "k8s.io/api/core/v1"
@@ -348,7 +351,7 @@ func runAllocation(ctx context.Context, opts allocationRunOptions) error {
 	}
 
 	// Table Output Path
-	table := tablewriter.NewWriter(opts.streams.Out)
+	table := newKubectlStyleTable(opts.streams.Out)
 	var headerSlice []string
 	headerSlice = append(headerSlice, "NODE")
 
@@ -381,8 +384,7 @@ func runAllocation(ctx context.Context, opts allocationRunOptions) error {
 	if opts.DisplayOpts.ShowHostPorts {
 		headerSlice = append(headerSlice, "HOST PORTS")
 	}
-	table.SetHeader(headerSlice)
-	setKubectlTableStyle(table)
+	table.Header(headerSlice)
 
 	for _, res := range results {
 		allocCPU := res.Node.Status.Allocatable.Cpu()
@@ -566,16 +568,37 @@ func aggregatePodRequests(pod *corev1.Pod, gpuResourceKey string) (resource.Quan
 	return sumCPU, sumMem, sumEphemeralStorage, sumGPU
 }
 
-func setKubectlTableStyle(table *tablewriter.Table) {
-	table.SetAutoWrapText(false)
-	table.SetAutoFormatHeaders(true)
-	table.SetHeaderAlignment(tablewriter.ALIGN_LEFT)
-	table.SetAlignment(tablewriter.ALIGN_LEFT)
-	table.SetCenterSeparator("")
-	table.SetColumnSeparator("")
-	table.SetRowSeparator("")
-	table.SetHeaderLine(false)
-	table.SetBorder(false)
-	table.SetTablePadding("  ") // two spaces for padding
-	table.SetNoWhiteSpace(true)
+func newKubectlStyleTable(w io.Writer) *tablewriter.Table {
+	return tablewriter.NewTable(w,
+
+		// tell render not to render any lines and separators
+		tablewriter.WithRenderer(renderer.NewBlueprint(tw.Rendition{
+			Borders: tw.BorderNone,
+			Settings: tw.Settings{
+				Separators: tw.SeparatorsNone,
+				Lines:      tw.LinesNone,
+			},
+		})),
+
+		// Set general configuration
+		tablewriter.WithConfig(
+			tablewriter.Config{
+				Header: tw.CellConfig{
+					Formatting: tw.CellFormatting{
+						Alignment:  tw.AlignLeft, // force alignment for header
+						AutoFormat: tw.Off,
+					},
+					Padding: tw.CellPadding{Global: tw.PaddingNone},
+				},
+				Row: tw.CellConfig{
+					Formatting: tw.CellFormatting{
+						Alignment: tw.AlignLeft, // force alightment for body
+					},
+
+					// remove all padding in a in all cells
+					Padding: tw.CellPadding{Global: tw.Padding{Right: "  "}},
+				},
+			},
+		),
+	)
 }
