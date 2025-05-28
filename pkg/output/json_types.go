@@ -23,28 +23,29 @@ package output
 // JSONNode represents a single node's data in JSON format.
 // Fields are tagged with `omitempty` if they are not always present.
 type JSONNode struct {
-	Name                        string  `json:"name"`
-	CPUAllocatable              string  `json:"cpuAllocatable"`
-	CPURequested                string  `json:"cpuRequested,omitempty"` // For allocation
-	CPUUsed                     string  `json:"cpuUsed,omitempty"`      // For utilization
-	CPUPercent                  float64 `json:"cpuPercent"`
-	MemoryAllocatable           string  `json:"memoryAllocatable"`
-	MemoryRequested             string  `json:"memoryRequested,omitempty"` // For allocation
-	MemoryUsed                  string  `json:"memoryUsed,omitempty"`      // For utilization
-	MemoryPercent               float64 `json:"memoryPercent"`
-	EphemeralStorageAllocatable string  `json:"ephemeralStorageAllocatable,omitempty"`
-	EphemeralStorageRequested   string  `json:"ephemeralStorageRequested,omitempty"` // For allocation
-	EphemeralStorageUsed        string  `json:"ephemeralStorageUsed,omitempty"`      // For utilization
-	EphemeralStoragePercent     float64 `json:"ephemeralStoragePercent,omitempty"`
-	FreeCPU                     string  `json:"freeCPU,omitempty"`              // If showFree is true
-	FreeMemory                  string  `json:"freeMemory,omitempty"`           // If showFree is true
-	FreeEphemeralStorage        string  `json:"freeEphemeralStorage,omitempty"` // If showFree and showEphemeralStorage are true
-	GPUAllocatable              string  `json:"gpuAllocatable,omitempty"`
-	GPURequested                string  `json:"gpuRequested,omitempty"` // For allocation
-	GPUUsed                     string  `json:"gpuUsed,omitempty"`      // For utilization
-	GPUPercent                  float64 `json:"gpuPercent,omitempty"`
-	FreeGPU                     string  `json:"freeGPU,omitempty"`   // If showFree and showGPU are true
-	HostPorts                   []int32 `json:"hostPorts,omitempty"` // For allocation, if showHostPorts is true
+	Name                        string   `json:"name"`
+	CPUAllocatable              string   `json:"cpuAllocatable"`
+	CPURequested                string   `json:"cpuRequested,omitempty"` // For allocation
+	CPUUsed                     string   `json:"cpuUsed,omitempty"`      // For utilization
+	CPUPercent                  float64  `json:"cpuPercent"`
+	MemoryAllocatable           string   `json:"memoryAllocatable"`
+	MemoryRequested             string   `json:"memoryRequested,omitempty"` // For allocation
+	MemoryUsed                  string   `json:"memoryUsed,omitempty"`      // For utilization
+	MemoryPercent               float64  `json:"memoryPercent"`
+	EphemeralStorageAllocatable string   `json:"ephemeralStorageAllocatable,omitempty"`
+	EphemeralStorageRequested   string   `json:"ephemeralStorageRequested,omitempty"` // For allocation
+	EphemeralStorageUsed        string   `json:"ephemeralStorageUsed,omitempty"`      // For utilization
+	EphemeralStoragePercent     float64  `json:"ephemeralStoragePercent,omitempty"`
+	FreeCPU                     string   `json:"freeCPU,omitempty"`              // If showFree is true
+	FreeMemory                  string   `json:"freeMemory,omitempty"`           // If showFree is true
+	FreeEphemeralStorage        string   `json:"freeEphemeralStorage,omitempty"` // If showFree and showEphemeralStorage are true
+	GPUAllocatable              string   `json:"gpuAllocatable,omitempty"`
+	GPURequested                string   `json:"gpuRequested,omitempty"` // For allocation
+	GPUUsed                     string   `json:"gpuUsed,omitempty"`      // For utilization
+	GPUPercent                  float64  `json:"gpuPercent,omitempty"`
+	FreeGPU                     string   `json:"freeGPU,omitempty"`   // If showFree and showGPU are true
+	HostPorts                   []int32  `json:"hostPorts,omitempty"` // For allocation, if showHostPorts is true
+	Taints                      []string `json:"taints,omitempty"`    // For allocation, if showTaints is true
 }
 
 // JSONPercentileDetail represents a single percentile data point in the summary.
@@ -59,6 +60,12 @@ type JSONPercentileDetail struct {
 type JSONHostPortSummary struct {
 	Port      int32 `json:"port"`
 	NodeCount int   `json:"nodeCount"`
+}
+
+// JSONTaintsSummary represents a taints usage summary.
+type JSONTaintsSummary struct {
+	Taint     string `json:"taint"`
+	NodeCount int    `json:"nodeCount"`
 }
 
 // JSONSummary represents the summary section of the JSON output.
@@ -80,7 +87,8 @@ type JSONSummary struct {
 	MemoryPercentiles             []JSONPercentileDetail `json:"memoryPercentiles,omitempty"` // Keeping existing percentile fields
 	EphemeralStoragePercentiles   []JSONPercentileDetail `json:"ephemeralStoragePercentiles,omitempty"`
 	GPUPercentiles                []JSONPercentileDetail `json:"gpuPercentiles,omitempty"`
-	TopHostPorts                  []JSONHostPortSummary  `json:"topHostPorts,omitempty"` // For allocation summary
+	TopHostPorts                  []JSONHostPortSummary  `json:"topHostPorts,omitempty"`  // For allocation summary
+	TaintsSummary                 []JSONTaintsSummary    `json:"taintsSummary,omitempty"` // For allocation summary
 }
 
 // JSONOutput is the root structure for the JSON output.

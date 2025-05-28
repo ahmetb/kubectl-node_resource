@@ -116,6 +116,7 @@ Nodes can be filtered by a label selector.`,
 	cmd.Flags().BoolVar(&displayOpts.ShowGPU, "show-gpu", false, "Show GPU allocation/utilization")
 	cmd.Flags().StringVar(&displayOpts.GpuResourceKey, "gpu-resource-key", "nvidia.com/gpu", "The resource key for GPU counting")
 	cmd.Flags().BoolVar(&displayOpts.ShowFree, "show-free", false, "Show free CPU, Memory, Ephemeral Storage and GPU on each node")
+	cmd.Flags().BoolVar(&displayOpts.ShowTaints, "show-taints", false, "Show taints on each node")
 	cmd.Flags().StringVar(&summaryOpt, "summary", utils.SummaryShow, fmt.Sprintf("Summary display option: %s, %s, or %s", utils.SummaryShow, utils.SummaryOnly, utils.SummaryHide))
 	cmd.Flags().BoolVar(&displayOpts.JSONOutput, "json", false, "Output in JSON format")
 	opts.AddFlags(cmd.Flags())
@@ -274,6 +275,11 @@ func runAllocation(ctx context.Context, opts allocationRunOptions) error {
 				sort.Slice(currentHostPorts, func(i, j int) bool { return currentHostPorts[i] < currentHostPorts[j] })
 			}
 
+			var taints []corev1.Taint
+			if opts.DisplayOpts.ShowTaints {
+				taints = node.Spec.Taints
+			}
+
 			results[i] = utils.NodeResult{
 				Node:       node,
 				ReqCPU:     totalCPU,
@@ -281,6 +287,7 @@ func runAllocation(ctx context.Context, opts allocationRunOptions) error {
 				CPUPercent: cpuPercent,
 				MemPercent: memPercent,
 				HostPorts:  currentHostPorts,
+				Taints:     taints,
 				FreeCPU:    freeCPU,
 				FreeMem:    freeMem,
 				// Ephemeral Storage

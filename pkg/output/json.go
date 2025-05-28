@@ -66,6 +66,11 @@ func ToJSONNode(nodeRes utils.NodeResult, cmdType utils.CmdType, displayOpts opt
 			jsonNode.GPURequested = utils.FormatGPU(nodeRes.ReqGPU)
 			jsonNode.GPUPercent = nodeRes.GPUPercent
 		}
+		if displayOpts.ShowTaints {
+			for _, taint := range nodeRes.Taints {
+				jsonNode.Taints = append(jsonNode.Taints, taint.ToString())
+			}
+		}
 	} else if cmdType == utils.CmdTypeUtilization {
 		if displayOpts.ShowCPU {
 			jsonNode.CPUUsed = utils.FormatCPU(nodeRes.ReqCPU) // ReqCPU stores actual usage in utilization context

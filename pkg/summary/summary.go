@@ -116,6 +116,47 @@ func GetResourcePercentilesData(results []utils.NodeResult, resourceName string,
 	return jsonData
 }
 
+// GetTaintsSummary returns an aggregated summary of node taints.
+func GetTaintsSummary(result []utils.NodeResult) []output.JSONTaintsSummary {
+	taintCounts := make(map[string]int)
+	totalTaintsFound := 0
+	for _, res := range result {
+		for _, taint := range res.Taints {
+			taintCounts[taint.ToString()]++
+			totalTaintsFound++
+		}
+	}
+
+	if totalTaintsFound == 0 {
+		return []output.JSONTaintsSummary{}
+	}
+
+	type taintStat struct {
+		taint string
+		count int
+	}
+	var stats []taintStat
+	for taint, count := range taintCounts {
+		stats = append(stats, taintStat{taint, count})
+	}
+
+	sort.Slice(stats, func(i, j int) bool {
+		if stats[i].count != stats[j].count {
+			return stats[i].count > stats[j].count
+		}
+		return stats[i].taint < stats[j].taint
+	})
+
+	jsonData := make([]output.JSONTaintsSummary, 0, len(stats))
+	for _, stat := range stats {
+		jsonData = append(jsonData, output.JSONTaintsSummary{
+			Taint:     stat.taint,
+			NodeCount: stat.count,
+		})
+	}
+	return jsonData
+}
+
 // GetTopHostPortsData aggregates host port usage and returns the top 10.
 func GetTopHostPortsData(results []utils.NodeResult) []output.JSONHostPortSummary {
 	portCounts := make(map[int32]int)
@@ -252,6 +293,10 @@ func GetNodeResourceSummaryData(results []utils.NodeResult, displayOpts options.
 	if cmdType == utils.CmdTypeAllocation && displayOpts.ShowHostPorts {
 		summary.TopHostPorts = GetTopHostPortsData(results)
 	}
+
+	if cmdType == utils.CmdTypeAllocation && displayOpts.ShowTaints {
+		summary.TaintsSummary = GetTaintsSummary(results)
+	}
 	return summary, nil
 }
 
@@ -301,6 +346,10 @@ func PrintNodeResourceSummary(results []utils.NodeResult, displayOpts options.Di
 
 	if cmdType == utils.CmdTypeAllocation && displayOpts.ShowHostPorts {
 		printTopHostPorts(results, out)
+	}
+
+	if cmdType == utils.CmdTypeAllocation && displayOpts.ShowTaints {
+		printTaints(results, out)
 	}
 }
 
@@ -533,5 +582,45 @@ func printTopHostPorts(results []utils.NodeResult, out io.Writer) {
 	}
 	if len(stats) > limit {
 		fmt.Fprintf(out, "  ... and %d more ports.\n", len(stats)-limit)
+	}
+}
+
+// printTaints prints an aggregated summary of node taints.
+// This is only relevant for the 'allocation' command.
+func printTaints(results []utils.NodeResult, out io.Writer) {
+	fmt.Fprintf(out, "\nTaints by Node:\n")
+
+	taintCounts := make(map[string]int)
+	totalTaintsFound := 0
+	for _, res := range results {
+		for _, taint := range res.Taints {
+			taintCounts[taint.ToString()]++
+			totalTaintsFound++
+		}
+	}
+
+	if totalTaintsFound == 0 {
+		fmt.Fprintln(out, "  No taints in use across selected nodes.")
+		return
+	}
+
+	type taintStat struct {
+		taint string
+		count int
+	}
+	var stats []taintStat
+	for taint, count := range taintCounts {
+		stats = append(stats, taintStat{taint, count})
+	}
+
+	sort.Slice(stats, func(i, j int) bool {
+		if stats[i].count != stats[j].count {
+			return stats[i].count > stats[j].count // Sort by count descending
+		}
+		return stats[i].taint < stats[j].taint // Then by taint ascending
+	})
+
+	for _, stat := range stats {
+		fmt.Fprintf(out, "  - %s (%d nodes)\n", stat.taint, stat.count)
 	}
 }
