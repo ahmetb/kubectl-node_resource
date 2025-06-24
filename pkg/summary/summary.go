@@ -116,6 +116,51 @@ func GetResourcePercentilesData(results []utils.NodeResult, resourceName string,
 	return jsonData
 }
 
+// GetPodCountPercentilesData calculates and returns percentiles for pod counts.
+func GetPodCountPercentilesData(results []utils.NodeResult, summaryContext string) []output.JSONPercentileDetail {
+	if len(results) == 0 {
+		return []output.JSONPercentileDetail{}
+	}
+
+	sortedResults := make([]utils.NodeResult, len(results))
+	copy(sortedResults, results)
+	sort.Slice(sortedResults, func(i, j int) bool {
+		return sortedResults[i].PodPercent < sortedResults[j].PodPercent
+	})
+
+	n := len(sortedResults)
+	defs := percentiles.DefaultPercentiles
+	jsonData := make([]output.JSONPercentileDetail, 0, len(defs))
+
+	for i := len(defs) - 1; i >= 0; i-- {
+		pDef := defs[i]
+		var index int
+		if pDef.Value == 1.00 { // Max value
+			index = n - 1
+		} else {
+			index = int(float64(n-1) * pDef.Value)
+		}
+		if index < 0 {
+			index = 0
+		}
+		if index >= n {
+			index = n - 1
+		}
+
+		nodeRes := sortedResults[index]
+		valueString := fmt.Sprintf("%d", nodeRes.PodCount)
+		percentValue := nodeRes.PodPercent
+
+		jsonData = append(jsonData, output.JSONPercentileDetail{
+			Percentile: pDef.Codename,
+			NodeName:   nodeRes.Node.Name,
+			Value:      valueString,
+			Percent:    percentValue,
+		})
+	}
+	return jsonData
+}
+
 // GetTaintsSummary returns an aggregated summary of node taints.
 func GetTaintsSummary(result []utils.NodeResult) []output.JSONTaintsSummary {
 	taintCounts := make(map[string]int)
@@ -290,6 +335,24 @@ func GetNodeResourceSummaryData(results []utils.NodeResult, displayOpts options.
 		summary.GPUPercentiles = GetResourcePercentilesData(results, "GPU", summaryContext)
 	}
 
+	if displayOpts.ShowPodCount {
+		var totalPods, totalPodCapacity int64
+		var sumPodPercent float64
+		for _, res := range results {
+			totalPods += res.PodCount
+			totalPodCapacity += res.AllocatablePods.Value()
+			sumPodPercent += res.PodPercent
+		}
+		avgPodPercent := 0.0
+		if len(results) > 0 {
+			avgPodPercent = sumPodPercent / float64(len(results))
+		}
+		summary.TotalPodCount = totalPods
+		summary.TotalPodCountCapacity = totalPodCapacity
+		summary.AveragePodPercent = avgPodPercent
+		summary.PodCountPercentiles = GetPodCountPercentilesData(results, summaryContext)
+	}
+
 	if cmdType == utils.CmdTypeAllocation && displayOpts.ShowHostPorts {
 		summary.TopHostPorts = GetTopHostPortsData(results)
 	}
@@ -305,26 +368,48 @@ func GetNodeResourceSummaryData(results []utils.NodeResult, displayOpts options.
 // If cmdType is "allocation" and displayOpts.ShowHostPorts is true, it also prints top host port usage.
 // It writes the output to the provided io.Writer (e.g., os.Stdout).
 func PrintNodeResourceSummary(results []utils.NodeResult, displayOpts options.DisplayOptions, out io.Writer, cmdType utils.CmdType) {
-	if len(results) == 0 {
-		return // No data to summarize
-	}
-
-	var summaryTitle string
-	var summaryContext string
-	if cmdType == utils.CmdTypeAllocation {
-		summaryTitle = "--- Node Resource Allocation Summary ---"
-		summaryContext = "Allocation"
-	} else if cmdType == utils.CmdTypeUtilization {
-		summaryTitle = "--- Node Resource Utilization Summary ---"
-		summaryContext = "Utilization"
-	} else {
-		fmt.Fprintf(out, "\n--- Unknown Node Resource Summary Type: %s ---\n", cmdType)
+	summaryData, err := GetNodeResourceSummaryData(results, displayOpts, cmdType)
+	if err != nil {
+		// It's better to log this or print to stderr, but for now, we'll print to out.
+		fmt.Fprintf(out, "Error generating summary data: %v\n", err)
 		return
 	}
+	if summaryData == nil {
+		return // No results to summarize
+	}
 
-	fmt.Fprintln(out, "\n"+summaryTitle)
-	fmt.Fprintf(out, "Total Nodes: %d\n", len(results))
+	var summaryContext string
+	if cmdType == utils.CmdTypeAllocation {
+		summaryContext = "Allocation"
+	} else if cmdType == utils.CmdTypeUtilization {
+		summaryContext = "Utilization"
+	}
 
+	// Print high-level totals
+	fmt.Fprintf(out, "\n--- Summary ---\n")
+	fmt.Fprintf(out, "Total nodes: %d\n", summaryData.TotalNodes)
+	if displayOpts.ShowCPU {
+		fmt.Fprintf(out, "Total CPU: %s allocatable, %s requested/used (avg: %.1f%%)\n",
+			summaryData.TotalCPUAllocatable, summaryData.TotalCPURequestedOrUsed, summaryData.AverageCPUPercent)
+	}
+	if displayOpts.ShowMemory {
+		fmt.Fprintf(out, "Total Memory: %s allocatable, %s requested/used (avg: %.1f%%)\n",
+			summaryData.TotalMemoryAllocatable, summaryData.TotalMemoryRequestedOrUsed, summaryData.AverageMemoryPercent)
+	}
+	if displayOpts.ShowEphemeralStorage {
+		fmt.Fprintf(out, "Total Ephemeral Storage: %s allocatable, %s requested/used (avg: %.1f%%)\n",
+			summaryData.TotalEphemeralAllocatable, summaryData.TotalEphemeralRequestedOrUsed, summaryData.AverageEphemeralPercent)
+	}
+	if displayOpts.ShowGPU {
+		fmt.Fprintf(out, "Total GPU: %s allocatable, %s requested/used (avg: %.1f%%)\n",
+			summaryData.TotalGPUAllocatable, summaryData.TotalGPURequestedOrUsed, summaryData.AverageGPUPercent)
+	}
+	if displayOpts.ShowPodCount {
+		fmt.Fprintf(out, "Total Pods: %d capacity, %d allocated (avg: %.1f%%)\n",
+			summaryData.TotalPodCountCapacity, summaryData.TotalPodCount, summaryData.AveragePodPercent)
+	}
+
+	// Print detailed sections
 	if displayOpts.ShowCPU {
 		printResourcePercentiles(results, summaryContext, "CPU", out)
 		printResourceDistributionHistogram(results, summaryContext, "CPU", out)
@@ -333,21 +418,23 @@ func PrintNodeResourceSummary(results []utils.NodeResult, displayOpts options.Di
 		printResourcePercentiles(results, summaryContext, "Memory", out)
 		printResourceDistributionHistogram(results, summaryContext, "Memory", out)
 	}
-
 	if displayOpts.ShowEphemeralStorage {
 		printResourcePercentiles(results, summaryContext, "EphemeralStorage", out)
 		printResourceDistributionHistogram(results, summaryContext, "EphemeralStorage", out)
 	}
-
 	if displayOpts.ShowGPU {
 		printResourcePercentiles(results, summaryContext, "GPU", out)
 		printResourceDistributionHistogram(results, summaryContext, "GPU", out)
 	}
 
+	if displayOpts.ShowPodCount {
+		printPodCountPercentiles(results, summaryContext, out)
+		printPodCountDistributionHistogram(results, summaryContext, out)
+	}
+
 	if cmdType == utils.CmdTypeAllocation && displayOpts.ShowHostPorts {
 		printTopHostPorts(results, out)
 	}
-
 	if cmdType == utils.CmdTypeAllocation && displayOpts.ShowTaints {
 		printTaints(results, out)
 	}
@@ -355,7 +442,7 @@ func PrintNodeResourceSummary(results []utils.NodeResult, displayOpts options.Di
 
 // printResourcePercentiles calculates and prints percentiles for a given resource (CPU, Memory, or EphemeralStorage)
 // based on the summary context (Allocation or Utilization).
-func printResourcePercentiles(results []utils.NodeResult, summaryContext string, resourceName string, out io.Writer) { // Removed showEphemeralStorage, it's implicit if resourceName is EphemeralStorage
+func printResourcePercentiles(results []utils.NodeResult, summaryContext string, resourceName string, out io.Writer) {
 	// Create a copy to sort independently
 	sortedResults := make([]utils.NodeResult, len(results))
 	copy(sortedResults, results)
@@ -407,11 +494,13 @@ func printResourcePercentiles(results []utils.NodeResult, summaryContext string,
 	for i := len(defs) - 1; i >= 0; i-- {
 		pDef := defs[i]
 		var index int
-		if pDef.Value == 1.00 { // Max value
+		if pDef.Value == 1.00 {
 			index = n - 1
 		} else {
-			index = int(float64(n-1) * pDef.Value) // Standard percentile calculation (nearest rank)
+			// Find the nearest index for the percentile
+			index = int(math.Round(float64(n-1) * pDef.Value))
 		}
+		// Bounds checking for safety, although with correct logic it might be redundant
 		if index < 0 {
 			index = 0
 		}
@@ -449,8 +538,48 @@ func printResourcePercentiles(results []utils.NodeResult, summaryContext string,
 	}
 }
 
+// printPodCountPercentiles prints a table of pod count percentiles.
+func printPodCountPercentiles(results []utils.NodeResult, summaryContext string, out io.Writer) {
+	if len(results) == 0 {
+		return
+	}
+
+	sortedResults := make([]utils.NodeResult, len(results))
+	copy(sortedResults, results)
+	sort.Slice(sortedResults, func(i, j int) bool { return sortedResults[i].PodPercent < sortedResults[j].PodPercent })
+
+	n := len(sortedResults)
+	fmt.Fprintf(out, "\nPod Count Limit %s Percentiles (by node):\n", summaryContext)
+
+	contextVerb := "allocated"
+
+	defs := percentiles.DefaultPercentiles
+	for i := len(defs) - 1; i >= 0; i-- {
+		pDef := defs[i]
+		var index int
+		if pDef.Value == 1.00 {
+			index = n - 1
+		} else {
+			index = int(math.Round(float64(n-1) * pDef.Value))
+		}
+		if index < 0 {
+			index = 0
+		}
+		if index >= n {
+			index = n - 1
+		}
+
+		nodeRes := sortedResults[index]
+		value := fmt.Sprintf("%d/%d", nodeRes.PodCount, nodeRes.AllocatablePods.Value())
+		percent := nodeRes.PodPercent
+		fmt.Fprintf(out, "  - %-15s: %s (%s: %s, %s%.1f%%%s)\n",
+			pDef.DisplayName, nodeRes.Node.Name, strings.Title(contextVerb), value,
+			ui.PercentFontColor(percent), percent, ui.ColorReset)
+	}
+}
+
 // printResourceDistributionHistogram prints a histogram of node distribution across utilization/allocation buckets.
-func printResourceDistributionHistogram(results []utils.NodeResult, summaryContext string, resourceName string, out io.Writer) { // Removed showEphemeralStorage for consistency
+func printResourceDistributionHistogram(results []utils.NodeResult, summaryContext string, resourceName string, out io.Writer) {
 	if len(results) == 0 {
 		return
 	}
@@ -467,7 +596,7 @@ func printResourceDistributionHistogram(results []utils.NodeResult, summaryConte
 	// Define buckets (0-10, 10-20, ..., 90-100)
 	numBuckets := 10
 	buckets := make([]int, numBuckets)
-	bucketSize := 10.0 // Each bucket represents 10%
+	bucketSize := 10.0
 
 	for _, res := range results {
 		var percentValue float64
@@ -528,6 +657,62 @@ func printResourceDistributionHistogram(results []utils.NodeResult, summaryConte
 		bucketMidPointPercent := float64(lowerBound) + bucketSize/2.0
 		color := ui.PercentFontColor(bucketMidPointPercent)
 
+		fmt.Fprintf(out, "  %s : %s%s%s (%d nodes)\n", label, color, bar, ui.ColorReset, nodeCount)
+	}
+}
+
+// printPodCountDistributionHistogram prints a histogram of pod count distribution.
+func printPodCountDistributionHistogram(results []utils.NodeResult, summaryContext string, out io.Writer) {
+	if len(results) == 0 {
+		return
+	}
+	contextVerb := "allocated"
+
+	fmt.Fprintf(out, "\nPod Count %s Distribution (%% of allocatable pods %s):\n", summaryContext, contextVerb)
+
+	numBuckets := 10
+	buckets := make([]int, numBuckets)
+	bucketSize := 10.0
+
+	for _, res := range results {
+		percentValue := res.PodPercent
+		bucketIndex := int(math.Floor(percentValue / bucketSize))
+		if bucketIndex >= numBuckets {
+			bucketIndex = numBuckets - 1
+		}
+		if bucketIndex < 0 {
+			bucketIndex = 0
+		}
+		buckets[bucketIndex]++
+	}
+
+	maxNodesInBucket := 0
+	for _, count := range buckets {
+		if count > maxNodesInBucket {
+			maxNodesInBucket = count
+		}
+	}
+
+	maxBarWidth := 40
+	if maxNodesInBucket == 0 {
+		maxBarWidth = 1
+	}
+
+	for i := 0; i < numBuckets; i++ {
+		lowerBound := i * int(bucketSize)
+		upperBound := (i + 1) * int(bucketSize)
+		label := fmt.Sprintf("%2d-%3d%%", lowerBound, upperBound)
+		if i == numBuckets-1 {
+			label = fmt.Sprintf("%2d-%3d%%", lowerBound, 100)
+		}
+		nodeCount := buckets[i]
+		barLength := 0
+		if maxNodesInBucket > 0 {
+			barLength = int(math.Round((float64(nodeCount) / float64(maxNodesInBucket)) * float64(maxBarWidth)))
+		}
+		bar := strings.Repeat("█", barLength)
+		bucketMidPointPercent := float64(lowerBound) + bucketSize/2.0
+		color := ui.PercentFontColor(bucketMidPointPercent)
 		fmt.Fprintf(out, "  %s : %s%s%s (%d nodes)\n", label, color, bar, ui.ColorReset, nodeCount)
 	}
 }

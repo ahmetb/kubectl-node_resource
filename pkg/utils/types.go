@@ -45,6 +45,11 @@ type NodeResult struct {
 	ReqGPU     resource.Quantity
 	GPUPercent float64
 	FreeGPU    resource.Quantity
+
+	// Pod Count fields
+	PodCount        int64
+	AllocatablePods resource.Quantity
+	PodPercent      float64
 }
 
 // CmdType indicates the command type for shared functions

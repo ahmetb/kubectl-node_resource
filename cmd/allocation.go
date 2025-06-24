@@ -75,8 +75,8 @@ Nodes can be filtered by a label selector.`,
   kubectl node-resource allocation "kubernetes.io/hostname=node1"`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if sortBy != utils.SortByCPUPercent && sortBy != utils.SortByMemoryPercent && sortBy != utils.SortByNodeName && sortBy != utils.SortByEphemeralStoragePercent {
-				return fmt.Errorf("invalid --sort-by value. Must be one of: %s, %s, %s, or %s", utils.SortByCPUPercent, utils.SortByMemoryPercent, utils.SortByNodeName, utils.SortByEphemeralStoragePercent)
+			if sortBy != utils.SortByCPUPercent && sortBy != utils.SortByMemoryPercent && sortBy != utils.SortByNodeName && sortBy != utils.SortByEphemeralStoragePercent && sortBy != utils.SortByPodPercent {
+				return fmt.Errorf("invalid --sort-by value. Must be one of: %s, %s, %s, %s, or %s", utils.SortByCPUPercent, utils.SortByMemoryPercent, utils.SortByNodeName, utils.SortByEphemeralStoragePercent, utils.SortByPodPercent)
 			}
 			if summaryOpt != utils.SummaryShow && summaryOpt != utils.SummaryOnly && summaryOpt != utils.SummaryHide {
 				return fmt.Errorf("invalid --summary value. Must be one of: %s, %s, %s", utils.SummaryShow, utils.SummaryOnly, utils.SummaryHide)
@@ -84,7 +84,7 @@ Nodes can be filtered by a label selector.`,
 
 			// Check if there's anything useful to display before proceeding
 			if !displayOpts.JSONOutput && !displayOpts.HasPrimaryDataColumns() {
-				fmt.Fprintln(streams.ErrOut, "Error: No data columns selected for display. Please enable at least one of --show-cpu, --show-memory, --show-gpu, --show-ephemeral-storage, --show-host-ports to display table data or generate a meaningful summary.")
+				fmt.Fprintln(streams.ErrOut, "Error: No data columns selected for display. Please enable at least one of --show-cpu, --show-memory, --show-gpu, --show-ephemeral-storage, --show-host-ports, --show-pod-count to display table data or generate a meaningful summary.")
 				return fmt.Errorf("no data columns selected for display")
 			}
 
@@ -96,7 +96,7 @@ Nodes can be filtered by a label selector.`,
 				"showCPU", displayOpts.ShowCPU, "showMemory", displayOpts.ShowMemory,
 				"showHostPorts", displayOpts.ShowHostPorts, "showFree", displayOpts.ShowFree,
 				"showEphemeralStorage", displayOpts.ShowEphemeralStorage, "showGPU", displayOpts.ShowGPU,
-				"gpuResourceKey", displayOpts.GpuResourceKey,
+				"showPodCount", displayOpts.ShowPodCount, "gpuResourceKey", displayOpts.GpuResourceKey,
 				"summary", summaryOpt, "json", displayOpts.JSONOutput)
 
 			runOpts := allocationRunOptions{
@@ -111,7 +111,7 @@ Nodes can be filtered by a label selector.`,
 		},
 	}
 
-	cmd.Flags().StringVar(&sortBy, "sort-by", utils.SortByCPUPercent, fmt.Sprintf("Sort nodes by: %s, %s, %s, or %s", utils.SortByCPUPercent, utils.SortByMemoryPercent, utils.SortByNodeName, utils.SortByEphemeralStoragePercent))
+	cmd.Flags().StringVar(&sortBy, "sort-by", utils.SortByCPUPercent, fmt.Sprintf("Sort nodes by: %s, %s, %s, %s, or %s", utils.SortByCPUPercent, utils.SortByMemoryPercent, utils.SortByNodeName, utils.SortByEphemeralStoragePercent, utils.SortByPodPercent))
 	cmd.Flags().BoolVar(&displayOpts.ShowCPU, "show-cpu", true, "Show CPU allocation/utilization")
 	cmd.Flags().BoolVar(&displayOpts.ShowMemory, "show-memory", true, "Show memory allocation/utilization")
 	cmd.Flags().BoolVar(&displayOpts.ShowHostPorts, "show-host-ports", false, "Show host ports used by containers on each node")
@@ -120,6 +120,7 @@ Nodes can be filtered by a label selector.`,
 	cmd.Flags().StringVar(&displayOpts.GpuResourceKey, "gpu-resource-key", "nvidia.com/gpu", "The resource key for GPU counting")
 	cmd.Flags().BoolVar(&displayOpts.ShowFree, "show-free", false, "Show free CPU, Memory, Ephemeral Storage and GPU on each node")
 	cmd.Flags().BoolVar(&displayOpts.ShowTaints, "show-taints", false, "Show taints on each node")
+	cmd.Flags().BoolVar(&displayOpts.ShowPodCount, "show-pod-count", false, "Show pod count/limit on each node")
 	cmd.Flags().StringVar(&summaryOpt, "summary", utils.SummaryShow, fmt.Sprintf("Summary display option: %s, %s, or %s", utils.SummaryShow, utils.SummaryOnly, utils.SummaryHide))
 	cmd.Flags().BoolVar(&displayOpts.JSONOutput, "json", false, "Output in JSON format")
 	opts.AddFlags(cmd.Flags())
@@ -235,6 +236,7 @@ func runAllocation(ctx context.Context, opts allocationRunOptions) error {
 			if opts.DisplayOpts.ShowGPU {
 				allocGPU = node.Status.Allocatable[corev1.ResourceName(opts.DisplayOpts.GpuResourceKey)]
 			}
+			allocPods := node.Status.Allocatable.Pods()
 
 			cpuPercent := utils.CalculatePercent(totalCPU.AsApproximateFloat64(), allocCPU.AsApproximateFloat64())
 			memPercent := utils.CalculatePercent(float64(totalMem.Value()), float64(allocMem.Value()))
@@ -243,6 +245,7 @@ func runAllocation(ctx context.Context, opts allocationRunOptions) error {
 			if opts.DisplayOpts.ShowGPU {
 				gpuPercent = utils.CalculatePercent(totalGPU.AsApproximateFloat64(), allocGPU.AsApproximateFloat64())
 			}
+			podPercent := utils.CalculatePercent(float64(len(podList.Items)), float64(allocPods.Value()))
 
 			freeCPU := allocCPU.DeepCopy()
 			freeCPU.Sub(totalCPU)
@@ -303,10 +306,15 @@ func runAllocation(ctx context.Context, opts allocationRunOptions) error {
 				ReqGPU:     totalGPU,
 				GPUPercent: gpuPercent,
 				FreeGPU:    freeGPU,
+				// Pods
+				PodCount:        int64(len(podList.Items)),
+				AllocatablePods: *allocPods,
+				PodPercent:      podPercent,
 			}
 			klog.V(5).InfoS("Finished processing node", "nodeName", node.Name,
 				"reqCPU", totalCPU.String(), "reqMem", totalMem.String(), "reqEphemeralStorage", totalEphemeralStorage.String(), "reqGPU", totalGPU.String(),
-				"freeCPU", freeCPU.String(), "freeMem", freeMem.String(), "freeEphemeralStorage", freeEphemeralStorage.String(), "freeGPU", freeGPU.String())
+				"freeCPU", freeCPU.String(), "freeMem", freeMem.String(), "freeEphemeralStorage", freeEphemeralStorage.String(), "freeGPU", freeGPU.String(),
+				"podCount", len(podList.Items), "allocatablePods", allocPods.Value())
 
 			if progressHelper != nil {
 				// Pass the same prefix, or an updated one if needed for this stage
@@ -367,6 +375,9 @@ func runAllocation(ctx context.Context, opts allocationRunOptions) error {
 	if opts.DisplayOpts.ShowGPU {
 		headerSlice = append(headerSlice, "GPU ALLOC", "GPU REQ", "GPU %")
 	}
+	if opts.DisplayOpts.ShowPodCount {
+		headerSlice = append(headerSlice, "PODS", "PODS LIMIT", "PODS%")
+	}
 	if opts.DisplayOpts.ShowFree {
 		if opts.DisplayOpts.ShowCPU {
 			headerSlice = append(headerSlice, "FREE CPU")
@@ -394,6 +405,7 @@ func runAllocation(ctx context.Context, opts allocationRunOptions) error {
 		cpuColor := ui.PercentFontColor(res.CPUPercent)
 		memColor := ui.PercentFontColor(res.MemPercent)
 		ephColor := ui.PercentFontColor(res.EphemeralStoragePercent)
+		podColor := ui.PercentFontColor(res.PodPercent)
 		var gpuColor string
 		if opts.DisplayOpts.ShowGPU {
 			gpuColor = ui.PercentFontColor(res.GPUPercent)
@@ -430,6 +442,14 @@ func runAllocation(ctx context.Context, opts allocationRunOptions) error {
 				utils.FormatGPU(res.AllocGPU),
 				utils.FormatGPU(res.ReqGPU),
 				fmt.Sprintf("%s%.1f%%%s", gpuColor, res.GPUPercent, ui.ColorReset),
+			)
+		}
+
+		if opts.DisplayOpts.ShowPodCount {
+			rowValues = append(rowValues,
+				fmt.Sprintf("%d", res.PodCount),
+				res.AllocatablePods.String(),
+				fmt.Sprintf("%s%.1f%%%s", podColor, res.PodPercent, ui.ColorReset),
 			)
 		}
 

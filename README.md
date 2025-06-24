@@ -60,7 +60,7 @@ resource pressure on each node.
 - **Selective Resource Display**: Allows users to choose which resources (CPU,
   Memory, Ephemeral Storage, Host Ports) are displayed in the output using flags
   like `--show-cpu`, `--show-memory`, `--show-gpu`, `--show-ephemeral-storage`,
-  and `--show-host-ports`.
+  `--show-pod-count`, and `--show-host-ports`.
 
 ## Usage
 
@@ -121,6 +121,7 @@ Both `allocation` and `utilization` commands support flags to control which reso
 
 The `allocation` command additionally supports:
 
+- `--show-pod-count`: (Default: `false`) Show number of Pods on each node and Pod count limits.
 - `--show-host-ports`: (Default: `false`) Show host ports used by containers on each node.
 - `--show-ephemeral-storage`: (Default: `false`) Show ephemeral storage allocation details.
 - `--show-gpu`: (Default: `false`) Show GPU allocation details.

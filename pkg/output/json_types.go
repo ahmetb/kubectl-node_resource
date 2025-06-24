@@ -46,6 +46,9 @@ type JSONNode struct {
 	FreeGPU                     string   `json:"freeGPU,omitempty"`   // If showFree and showGPU are true
 	HostPorts                   []int32  `json:"hostPorts,omitempty"` // For allocation, if showHostPorts is true
 	Taints                      []string `json:"taints,omitempty"`    // For allocation, if showTaints is true
+	PodCount                    int64    `json:"podCount,omitempty"`
+	PodCountAllocatable         int64    `json:"podCountAllocatable,omitempty"`
+	PodPercent                  float64  `json:"podPercent,omitempty"`
 }
 
 // JSONPercentileDetail represents a single percentile data point in the summary.
@@ -83,10 +86,14 @@ type JSONSummary struct {
 	TotalGPUAllocatable           string                 `json:"totalGpuAllocatable,omitempty"`
 	TotalGPURequestedOrUsed       string                 `json:"totalGpuRequestedOrUsed,omitempty"` // Context-dependent
 	AverageGPUPercent             float64                `json:"averageGpuPercent,omitempty"`
+	TotalPodCount                 int64                  `json:"totalPodCount,omitempty"`
+	TotalPodCountCapacity         int64                  `json:"totalPodCountCapacity,omitempty"`
+	AveragePodPercent             float64                `json:"averagePodPercent,omitempty"`
 	CPUPercentiles                []JSONPercentileDetail `json:"cpuPercentiles,omitempty"`    // Keeping existing percentile fields
 	MemoryPercentiles             []JSONPercentileDetail `json:"memoryPercentiles,omitempty"` // Keeping existing percentile fields
 	EphemeralStoragePercentiles   []JSONPercentileDetail `json:"ephemeralStoragePercentiles,omitempty"`
 	GPUPercentiles                []JSONPercentileDetail `json:"gpuPercentiles,omitempty"`
+	PodCountPercentiles           []JSONPercentileDetail `json:"podCountPercentiles,omitempty"`
 	TopHostPorts                  []JSONHostPortSummary  `json:"topHostPorts,omitempty"`  // For allocation summary
 	TaintsSummary                 []JSONTaintsSummary    `json:"taintsSummary,omitempty"` // For allocation summary
 }

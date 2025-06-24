@@ -38,6 +38,8 @@ const (
 	SortByMemoryPercent = "memory-percent"
 	// SortByEphemeralStoragePercent sorts nodes by ephemeral storage percentage.
 	SortByEphemeralStoragePercent = "eph-percent"
+	// SortByPodPercent sorts nodes by pod count percentage.
+	SortByPodPercent = "pod-count-percent"
 	// SortByNodeName sorts nodes by name.
 	SortByNodeName = "name"
 
@@ -156,6 +158,18 @@ func SortResults(results []NodeResult, sortBy string) {
 			}
 			if results[i].GPUPercent != results[j].GPUPercent {
 				return results[i].GPUPercent > results[j].GPUPercent
+			}
+			return results[i].Node.Name < results[j].Node.Name
+		case SortByPodPercent:
+			if results[i].PodPercent != results[j].PodPercent {
+				return results[i].PodPercent > results[j].PodPercent
+			}
+			// Tie-breaking
+			if results[i].CPUPercent != results[j].CPUPercent {
+				return results[i].CPUPercent > results[j].CPUPercent
+			}
+			if results[i].MemPercent != results[j].MemPercent {
+				return results[i].MemPercent > results[j].MemPercent
 			}
 			return results[i].Node.Name < results[j].Node.Name
 		default: // SortByNodeName
