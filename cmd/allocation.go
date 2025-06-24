@@ -588,15 +588,25 @@ func newKubectlStyleTable(w io.Writer) *tablewriter.Table {
 						Alignment:  tw.AlignLeft, // force alignment for header
 						AutoFormat: tw.Off,
 					},
-					Padding: tw.CellPadding{Global: tw.PaddingNone},
+					// use two spaces for padding on the right side of header cells
+					// like kubectl does
+					Padding: tw.CellPadding{
+						Global: tw.Padding{
+							Left: tw.Empty, Right: "  ", Overwrite: true,
+						},
+					},
 				},
 				Row: tw.CellConfig{
 					Formatting: tw.CellFormatting{
 						Alignment: tw.AlignLeft, // force alightment for body
 					},
-
-					// remove all padding in a in all cells
-					Padding: tw.CellPadding{Global: tw.Padding{Right: "  "}},
+					// use two spaces for padding on the right side of header cells
+					// like kubectl does
+					Padding: tw.CellPadding{
+						Global: tw.Padding{
+							Left: tw.Empty, Right: "  ", Overwrite: true,
+						},
+					},
 				},
 			},
 		),
