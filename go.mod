@@ -7,7 +7,7 @@ require (
 	github.com/olekukonko/tablewriter v1.0.8
 	github.com/schollz/progressbar/v3 v3.18.0
 	github.com/spf13/cobra v1.9.1
-	golang.org/x/sync v0.15.0
+	golang.org/x/sync v0.16.0
 	k8s.io/api v0.33.2
 	k8s.io/apimachinery v0.33.2
 	k8s.io/cli-runtime v0.33.2
