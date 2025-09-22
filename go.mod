@@ -4,7 +4,7 @@ go 1.24.2
 
 require (
 	github.com/mattn/go-isatty v0.0.20
-	github.com/olekukonko/tablewriter v1.0.9
+	github.com/olekukonko/tablewriter v1.1.0
 	github.com/schollz/progressbar/v3 v3.18.0
 	github.com/spf13/cobra v1.9.1
 	golang.org/x/sync v0.17.0
